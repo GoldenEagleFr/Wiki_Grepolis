@@ -514,16 +514,6 @@ thead th {
   border-color: #609060;
 }
 
-.panel--source p {
-  margin: 0;
-  font-size: 0.95rem;
-  color: #4d3922;
-  max-width: var(--measure);
-  text-align: justify;
-  text-justify: inter-word;
-  hyphens: auto;
-}
-
 .checklist-grid {
   display: grid;
   gap: 1.05rem;
