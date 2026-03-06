@@ -7,25 +7,26 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="hero">
+  <header id="top" class="hero">
     <div class="hero__inner">
       <p class="hero__tag">Wiki personnel de stratégie</p>
       <h1>Spécialisation des villes</h1>
       <p class="hero__lead">
         Guide dédié au mode Conquête / Domination: ordre de construction et niveaux cibles pour maximiser la population utile.
       </p>
-      <nav class="hero__nav">
-        <a href="specialisation-des-villes.html">Accueil</a>
-        <a href="#regles-pop">Règles population</a>
-        <a href="#def-navale">DEF navale</a>
-        <a href="#off-navale">OFF navale</a>
-        <a href="#def-terre">DEF terrestre</a>
-        <a href="#off-terre">OFF terrestre</a>
-        <a href="#off-myth">OFF mythique</a>
-        <a href="#def-myth">DEF mythique</a>
-      </nav>
     </div>
   </header>
+
+  <nav class="hero__nav" aria-label="Navigation des spécialisations">
+    <a href="#top">Accueil</a>
+    <a href="#regles-pop">Règles population</a>
+    <a href="#def-navale">DEF navale</a>
+    <a href="#off-navale">OFF navale</a>
+    <a href="#def-terre">DEF terrestre</a>
+    <a href="#off-terre">OFF terrestre</a>
+    <a href="#off-myth">OFF mythique</a>
+    <a href="#def-myth">DEF mythique</a>
+  </nav>
 
   <main class="container">
     <section id="regles-pop" class="panel">
@@ -65,7 +66,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section id="fiches-spec" class="panel">
       <div class="panel__head">
         <h2>Fiches de spécialisation</h2>
         <p>Sources directes intégrées quand disponibles (<span class="unit-name"><img class="unit-icon" src="assets/icons/unites/60px-bireme.jpg" alt="" loading="lazy" decoding="async">birèmes</span>, <span class="unit-name"><img class="unit-icon" src="assets/icons/unites/60px-brulot.jpg" alt="" loading="lazy" decoding="async">bateaux-feu</span>, OFF/DEF terre), puis adaptation pour les rôles mythiques. Ouvre une fiche à la fois avec le bouton “Afficher / Masquer”.</p>
@@ -278,13 +279,122 @@
       </div>
     </section>
 
-    <section class="panel panel--source">
+    <section id="source-panel" class="panel panel--source">
       <p>
         Base source: <a class="inline-link" href="https://grepolis-david1327.e-monsite.com/pages/specialisation-des-villes.html" target="_blank" rel="noopener noreferrer">Spécialisation des villes (archives)</a>.
         Les templates mythiques sont une adaptation pratique pour ton usage personnel en Conquête/Domination.
       </p>
     </section>
   </main>
+  <script>
+    (function () {
+      const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+      const navLinks = Array.from(document.querySelectorAll(".hero__nav a[href^=\"#\"]"));
+      const rulesPanel = document.getElementById("regles-pop");
+      const specsPanel = document.getElementById("fiches-spec");
+      const sourcePanel = document.getElementById("source-panel");
+      const specSheets = Array.from(document.querySelectorAll(".spec-sheet[id]"));
+      const specIds = new Set(specSheets.map((sheet) => sheet.id));
+
+      if (!rulesPanel || !specsPanel || !sourcePanel || !navLinks.length) {
+        return;
+      }
+
+      function getBehavior() {
+        return prefersReduced.matches ? "auto" : "smooth";
+      }
+
+      function normalizeHash(hash) {
+        const id = decodeURIComponent((hash || "").replace(/^#/, "")).trim();
+        if (!id || id === "top") {
+          return "regles-pop";
+        }
+        if (id === "regles-pop" || specIds.has(id)) {
+          return id;
+        }
+        return "regles-pop";
+      }
+
+      function setActiveLink(activeId) {
+        navLinks.forEach((link) => {
+          const href = link.getAttribute("href") || "";
+          const linkId = decodeURIComponent(href.replace(/^#/, "")).trim();
+          const isActive = linkId === activeId;
+          link.classList.toggle("is-active", isActive);
+          if (isActive) {
+            link.setAttribute("aria-current", "page");
+          } else {
+            link.removeAttribute("aria-current");
+          }
+        });
+      }
+
+      function showRulesView() {
+        rulesPanel.classList.remove("is-hidden-section");
+        specsPanel.classList.add("is-hidden-section");
+        sourcePanel.classList.add("is-hidden-section");
+        specSheets.forEach((sheet) => {
+          sheet.classList.remove("is-hidden-section");
+          sheet.open = false;
+        });
+      }
+
+      function showSpecView(targetId) {
+        rulesPanel.classList.add("is-hidden-section");
+        specsPanel.classList.remove("is-hidden-section");
+        sourcePanel.classList.add("is-hidden-section");
+        specSheets.forEach((sheet) => {
+          const isCurrent = sheet.id === targetId;
+          sheet.classList.toggle("is-hidden-section", !isCurrent);
+          sheet.open = isCurrent;
+        });
+      }
+
+      function scrollToView(targetId) {
+        const target = targetId === "regles-pop"
+          ? rulesPanel
+          : document.getElementById(targetId);
+        if (!target) {
+          return;
+        }
+        target.scrollIntoView({ behavior: getBehavior(), block: "start" });
+      }
+
+      function applyView(hash, pushHash) {
+        const targetId = normalizeHash(hash);
+        if (targetId === "regles-pop") {
+          showRulesView();
+        } else {
+          showSpecView(targetId);
+        }
+
+        setActiveLink(targetId);
+        scrollToView(targetId);
+        if (pushHash) {
+          history.pushState(null, "", "#" + targetId);
+        }
+      }
+
+      navLinks.forEach((link) => {
+        link.addEventListener("click", (event) => {
+          const hash = link.getAttribute("href");
+          if (!hash || hash === "#") {
+            return;
+          }
+          event.preventDefault();
+          applyView(hash, true);
+        });
+      });
+
+      window.addEventListener("hashchange", () => {
+        applyView(window.location.hash, false);
+      });
+
+      window.requestAnimationFrame(() => {
+        applyView(window.location.hash, false);
+      });
+    })();
+  </script>
 </body>
 </html>
 
