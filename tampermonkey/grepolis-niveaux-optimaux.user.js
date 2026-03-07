@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         Grepolis - Niveaux optimaux de batiments
 // @namespace    https://github.com/GoldenEagleFr/Wiki_Grepolis
-// @version      1.3.0
-// @description  Niveaux optimaux avec priorite, mode monde (Revolte/Conquete), fenetre deplacable et redimensionnable.
+// @version      1.4.0
+// @description  Niveaux optimaux avec simulation cout/temps, mode monde (Revolte/Conquete), fenetre deplacable et redimensionnable.
 // @author       GoldenEagleFr
 // @match        https://*.grepolis.com/game/*
 // @match        https://*.grepolis.fr/game/*
@@ -40,7 +40,10 @@
     storage: ["storage", "warehouse"],
     market: ["market", "marketplace"],
     wall: ["wall", "city_wall"],
-    main: ["main", "senate"]
+    main: ["main", "senate"],
+    lumber: ["lumber", "timber", "timber_camp"],
+    stoner: ["stoner", "quarry"],
+    ironer: ["ironer", "silver_mine", "mine", "mine_silver"]
   };
   const KNOWN_BUILDING_KEYS = Object.freeze([
     "farm",
@@ -104,6 +107,50 @@
     stoner: "Carriere",
     ironer: "Mine d'argent"
   };
+
+  const RESOURCE_KEYS = Object.freeze(["wood", "stone", "iron"]);
+  const RESOURCE_BUILDING_KEYS = Object.freeze(["lumber", "stoner", "ironer"]);
+  const RESOURCE_BUILDING_TO_RESOURCE = Object.freeze({
+    lumber: "wood",
+    stoner: "stone",
+    ironer: "iron"
+  });
+  const DEFAULT_RESOURCE_TARGET_RANGE = Object.freeze([40, 40]);
+  // Source: Support Grepolis - Quarry/Silver Mine/Timber Camp tables, neutral island output.
+  const RESOURCE_OUTPUT_PER_HOUR_SPEED1 = Object.freeze([
+    7, 8, 12, 18, 24, 30, 37, 43, 51, 58, 66,
+    73, 81, 89, 98, 106, 114, 123, 132, 141, 150,
+    159, 168, 178, 187, 197, 206, 216, 226, 236, 246,
+    256, 266, 276, 286, 297, 307, 318, 328, 339, 350
+  ]);
+  // Source: Support Grepolis - Senate page (construction speed by senate level).
+  const SENATE_BUILD_SPEED_PCT = Object.freeze({
+    1: 100.0,
+    2: 98.6,
+    3: 97.0,
+    4: 95.3,
+    5: 93.5,
+    6: 91.5,
+    7: 89.5,
+    8: 87.4,
+    9: 85.3,
+    10: 83.0,
+    11: 80.8,
+    12: 78.4,
+    13: 76.1,
+    14: 73.7,
+    15: 71.2,
+    16: 68.7,
+    17: 66.1,
+    18: 63.6,
+    19: 60.9,
+    20: 58.3,
+    21: 55.6,
+    22: 52.9,
+    23: 50.1,
+    24: 47.4,
+    25: 44.5
+  });
 
   const PRESETS_BY_MODE = {
     revolte: {
@@ -378,7 +425,7 @@
     const presets = getPresetMap();
     const fallbackKey = getDefaultPresetKey(presets);
     const fallback = presets[fallbackKey];
-    return cloneTargets((fallback && fallback.targets) || {});
+    return ensureProductionTargets(cloneTargets((fallback && fallback.targets) || {}));
   }
 
   function inferSpecialBuilding(targets) {
@@ -421,6 +468,63 @@
     return ordered;
   }
 
+  function normalizeBuildingKey(key) {
+    if (!key) {
+      return key;
+    }
+    const asString = String(key);
+    if (KNOWN_BUILDING_KEYS.includes(asString)) {
+      return asString;
+    }
+    for (const [canonical, aliases] of Object.entries(BUILDING_KEY_ALIASES)) {
+      if (canonical === asString || aliases.includes(asString)) {
+        return canonical;
+      }
+    }
+    return asString;
+  }
+
+  function ensureProductionTargets(targets) {
+    const normalized = cloneTargets(targets);
+    RESOURCE_BUILDING_KEYS.forEach((key) => {
+      if (!normalized[key]) {
+        normalized[key] = [...DEFAULT_RESOURCE_TARGET_RANGE];
+      }
+    });
+    return normalized;
+  }
+
+  function ensureProductionPriority(baseOrder, targets) {
+    const normalizedTargets = ensureProductionTargets(targets);
+    const normalizedBase = Array.isArray(baseOrder)
+      ? baseOrder.map((key) => normalizeBuildingKey(key))
+      : [];
+    const merged = [];
+    const seen = new Set();
+
+    normalizedBase.forEach((key) => {
+      if (!key || seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      merged.push(key);
+    });
+
+    const toInject = RESOURCE_BUILDING_KEYS.filter((key) => normalizedTargets[key] && !seen.has(key));
+    if (toInject.length) {
+      let insertAt = merged.indexOf("main");
+      if (insertAt === -1) {
+        insertAt = merged.indexOf("farm");
+      }
+      insertAt = insertAt === -1 ? 0 : insertAt + 1;
+      toInject.forEach((key, offset) => {
+        merged.splice(insertAt + offset, 0, key);
+      });
+    }
+
+    return buildPriorityOrder(merged, normalizedTargets);
+  }
+
   function getCustomTargets() {
     const storageKey = getCustomTargetsStorageKey();
     try {
@@ -440,7 +544,7 @@
         return getDefaultCustomTargets();
       }
       const parsed = JSON.parse(raw);
-      const normalized = cloneTargets(parsed);
+      const normalized = ensureProductionTargets(cloneTargets(parsed));
       if (Object.keys(normalized).length) {
         return normalized;
       }
@@ -449,18 +553,18 @@
   }
 
   function saveCustomTargets(targets) {
-    localStorage.setItem(getCustomTargetsStorageKey(), JSON.stringify(cloneTargets(targets)));
+    localStorage.setItem(getCustomTargetsStorageKey(), JSON.stringify(ensureProductionTargets(cloneTargets(targets))));
   }
 
   function getPresetConfig(presetKey) {
     const presets = getPresetMap();
     if (presetKey === CUSTOM_PRESET_ID) {
-      const targets = getCustomTargets();
+      const targets = ensureProductionTargets(getCustomTargets());
       return {
         key: CUSTOM_PRESET_ID,
         label: "Personnalise",
         targets,
-        priorityOrder: buildPriorityOrder([], targets),
+        priorityOrder: ensureProductionPriority([], targets),
         specialBuilding: inferSpecialBuilding(targets),
         isCustom: true
       };
@@ -468,12 +572,12 @@
 
     if (presets[presetKey]) {
       const preset = presets[presetKey];
-      const targets = preset.targets;
+      const targets = ensureProductionTargets(preset.targets);
       return {
         key: presetKey,
         label: preset.label,
         targets,
-        priorityOrder: buildPriorityOrder(preset.priorityOrder, targets),
+        priorityOrder: ensureProductionPriority(preset.priorityOrder, targets),
         specialBuilding: preset.specialBuilding || inferSpecialBuilding(targets),
         isCustom: false
       };
@@ -494,14 +598,14 @@
     return {
       key: fallbackKey,
       label: fallback.label,
-      targets: fallback.targets,
-      priorityOrder: buildPriorityOrder(fallback.priorityOrder, fallback.targets),
-      specialBuilding: fallback.specialBuilding || inferSpecialBuilding(fallback.targets),
+      targets: ensureProductionTargets(fallback.targets),
+      priorityOrder: ensureProductionPriority(fallback.priorityOrder, fallback.targets),
+      specialBuilding: fallback.specialBuilding || inferSpecialBuilding(ensureProductionTargets(fallback.targets)),
       isCustom: false
     };
   }
 
-  function getPriorityPlan(preset, levels) {
+  function getSimplePriorityPlan(preset, levels) {
     const order = Array.isArray(preset.priorityOrder) ? preset.priorityOrder : Object.keys(preset.targets);
     const orderIndex = new Map(order.map((key, index) => [key, index]));
     const tasks = [];
@@ -521,7 +625,12 @@
           min,
           max,
           gap: min - level,
-          order: orderIndex.has(key) ? orderIndex.get(key) : 9999
+          targetLevel: min,
+          order: orderIndex.has(key) ? orderIndex.get(key) : 9999,
+          waitSeconds: 0,
+          buildSeconds: 0,
+          finishSeconds: 0,
+          simulated: false
         });
       } else if (level < max) {
         tasks.push({
@@ -531,7 +640,12 @@
           min,
           max,
           gap: max - level,
-          order: orderIndex.has(key) ? orderIndex.get(key) : 9999
+          targetLevel: max,
+          order: orderIndex.has(key) ? orderIndex.get(key) : 9999,
+          waitSeconds: 0,
+          buildSeconds: 0,
+          finishSeconds: 0,
+          simulated: false
         });
       }
     });
@@ -554,6 +668,709 @@
     });
 
     return tasks;
+  }
+
+  function readLooseNumber(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === "string") {
+      const normalized = value.trim().replace(/\s+/g, "").replace(",", ".");
+      if (/^-?\d+(\.\d+)?$/.test(normalized)) {
+        const parsed = Number(normalized);
+        if (Number.isFinite(parsed)) {
+          return parsed;
+        }
+      }
+    }
+    return null;
+  }
+
+  function parseDurationToSeconds(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value !== "string") {
+      return null;
+    }
+    const text = value.trim();
+    const hhmmss = text.match(/^(\d+):(\d{2}):(\d{2})$/);
+    if (hhmmss) {
+      return Number(hhmmss[1]) * 3600 + Number(hhmmss[2]) * 60 + Number(hhmmss[3]);
+    }
+    const mmss = text.match(/^(\d+):(\d{2})$/);
+    if (mmss) {
+      return Number(mmss[1]) * 60 + Number(mmss[2]);
+    }
+    return readLooseNumber(text);
+  }
+
+  function pickFirstFiniteNumber(...values) {
+    for (const value of values) {
+      const parsed = readLooseNumber(value);
+      if (parsed !== null && Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  function getAliasesForBuilding(buildingKey) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const aliases = BUILDING_KEY_ALIASES[canonical] || [canonical];
+    const ordered = [canonical];
+    aliases.forEach((alias) => {
+      if (!ordered.includes(alias)) {
+        ordered.push(alias);
+      }
+    });
+    return ordered;
+  }
+
+  function getGameDataBuildings() {
+    try {
+      if (uw.GameData && uw.GameData.buildings && typeof uw.GameData.buildings === "object") {
+        return uw.GameData.buildings;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function getBuildingDataEntry(buildingKey) {
+    const gameDataBuildings = getGameDataBuildings();
+    if (!gameDataBuildings) {
+      return null;
+    }
+    const aliases = getAliasesForBuilding(buildingKey);
+    for (const alias of aliases) {
+      if (gameDataBuildings[alias] && typeof gameDataBuildings[alias] === "object") {
+        return gameDataBuildings[alias];
+      }
+    }
+    return null;
+  }
+
+  function getLevelConfigFromData(entry, level) {
+    if (!entry || typeof entry !== "object" || !Number.isFinite(level)) {
+      return null;
+    }
+
+    const keys = [String(level), level];
+    for (const key of keys) {
+      if (entry[key] && typeof entry[key] === "object") {
+        return entry[key];
+      }
+    }
+
+    const containers = [
+      "levels",
+      "level_data",
+      "levels_data",
+      "data_by_level",
+      "per_level"
+    ];
+
+    for (const containerKey of containers) {
+      const container = entry[containerKey];
+      if (!container) {
+        continue;
+      }
+      if (Array.isArray(container)) {
+        const candidate = container[level] || container[level - 1];
+        if (candidate && typeof candidate === "object") {
+          return candidate;
+        }
+        continue;
+      }
+      if (typeof container === "object") {
+        const candidate = container[level] || container[String(level)];
+        if (candidate && typeof candidate === "object") {
+          return candidate;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function readResourcePayload(raw) {
+    if (!raw || typeof raw !== "object") {
+      return null;
+    }
+    const payload = raw.resources && typeof raw.resources === "object" ? raw.resources : raw;
+    const wood = pickFirstFiniteNumber(payload.wood, payload.w);
+    const stone = pickFirstFiniteNumber(payload.stone, payload.s);
+    const iron = pickFirstFiniteNumber(payload.iron, payload.i, payload.silver);
+    const population = pickFirstFiniteNumber(payload.population, payload.pop);
+    const favor = pickFirstFiniteNumber(payload.favor);
+    const hasCore = wood !== null || stone !== null || iron !== null;
+    if (!hasCore) {
+      return null;
+    }
+    return {
+      wood: Math.max(0, Math.round(wood || 0)),
+      stone: Math.max(0, Math.round(stone || 0)),
+      iron: Math.max(0, Math.round(iron || 0)),
+      population: Math.max(0, Math.round(population || 0)),
+      favor: Math.max(0, Math.round(favor || 0))
+    };
+  }
+
+  function estimateUpgradeCost(buildingKey, targetLevel, cache) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const cacheKey = `${canonical}:${targetLevel}`;
+    if (cache && cache.has(cacheKey)) {
+      return cache.get(cacheKey);
+    }
+
+    const entry = getBuildingDataEntry(canonical);
+    let result = null;
+
+    if (entry) {
+      const levelConfig = getLevelConfigFromData(entry, targetLevel);
+      if (levelConfig) {
+        result = readResourcePayload(
+          levelConfig.resources ||
+          levelConfig.costs ||
+          levelConfig.cost ||
+          levelConfig.build_resources ||
+          levelConfig
+        );
+      }
+
+      if (!result) {
+        const baseResources = readResourcePayload(entry.resources || entry.costs || entry.cost || entry.build_resources);
+        const resourcesFactor = pickFirstFiniteNumber(
+          entry.resources_factor,
+          entry.resource_factor,
+          entry.cost_factor,
+          entry.build_resources_factor
+        );
+        if (baseResources && resourcesFactor !== null && resourcesFactor > 0) {
+          result = {
+            wood: Math.max(0, Math.round(baseResources.wood * Math.pow(targetLevel, resourcesFactor))),
+            stone: Math.max(0, Math.round(baseResources.stone * Math.pow(targetLevel, resourcesFactor))),
+            iron: Math.max(0, Math.round(baseResources.iron * Math.pow(targetLevel, resourcesFactor))),
+            population: 0,
+            favor: 0
+          };
+        }
+      }
+
+      if (result && result.population <= 0) {
+        const basePop = pickFirstFiniteNumber(entry.pop, entry.population);
+        const popFactor = pickFirstFiniteNumber(entry.pop_factor, entry.population_factor, entry.resources_factor);
+        if (basePop !== null) {
+          if (popFactor !== null && popFactor > 0) {
+            result.population = Math.max(0, Math.round(basePop * Math.pow(targetLevel, popFactor)));
+          } else {
+            result.population = Math.max(0, Math.round(basePop));
+          }
+        }
+      }
+    }
+
+    if (!result) {
+      return null;
+    }
+
+    if (cache) {
+      cache.set(cacheKey, result);
+    }
+    return result;
+  }
+
+  function getWorldSpeedFactor() {
+    const speed = pickFirstFiniteNumber(
+      uw.Game && uw.Game.game_speed,
+      uw.Game && uw.Game.world_speed,
+      uw.GameData && uw.GameData.world && uw.GameData.world.speed,
+      uw.GameData && uw.GameData.game_speed
+    );
+    if (speed === null || speed <= 0) {
+      return 1;
+    }
+    return speed;
+  }
+
+  function getSenateConstructionPercent(level) {
+    const clamped = Math.max(1, Math.min(25, toInt(level, 1)));
+    return SENATE_BUILD_SPEED_PCT[clamped] || SENATE_BUILD_SPEED_PCT[1];
+  }
+
+  function estimateUpgradeBuildSeconds(buildingKey, targetLevel, senateLevel, worldSpeed, cache) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const safeSenate = Math.max(1, toInt(senateLevel, 1));
+    const safeWorldSpeed = worldSpeed > 0 ? worldSpeed : 1;
+    const cacheKey = `${canonical}:${targetLevel}:s${safeSenate}:w${safeWorldSpeed}`;
+    if (cache && cache.has(cacheKey)) {
+      return cache.get(cacheKey);
+    }
+
+    const entry = getBuildingDataEntry(canonical);
+    if (!entry) {
+      return null;
+    }
+
+    let baseAtSenate15 = null;
+    const levelConfig = getLevelConfigFromData(entry, targetLevel);
+    if (levelConfig) {
+      baseAtSenate15 = parseDurationToSeconds(
+        levelConfig.build_time ||
+        levelConfig.time ||
+        levelConfig.duration ||
+        levelConfig.construction_time
+      );
+    }
+
+    if (baseAtSenate15 === null) {
+      const buildTimeBase = pickFirstFiniteNumber(entry.build_time, entry.time, entry.duration);
+      const buildTimeFactor = pickFirstFiniteNumber(entry.build_time_factor, entry.time_factor, entry.duration_factor);
+      if (buildTimeBase !== null) {
+        if (buildTimeFactor !== null && buildTimeFactor > 0) {
+          baseAtSenate15 = buildTimeBase * Math.pow(targetLevel, buildTimeFactor);
+        } else {
+          baseAtSenate15 = buildTimeBase;
+        }
+      }
+    }
+
+    if (baseAtSenate15 === null || baseAtSenate15 <= 0) {
+      return null;
+    }
+
+    const senateFactor = getSenateConstructionPercent(safeSenate) / SENATE_BUILD_SPEED_PCT[15];
+    const adjusted = Math.max(1, baseAtSenate15 * senateFactor / safeWorldSpeed);
+    if (cache) {
+      cache.set(cacheKey, adjusted);
+    }
+    return adjusted;
+  }
+
+  function normalizeDependencies(raw, targetLevel) {
+    if (!raw) {
+      return [];
+    }
+
+    let source = raw;
+    if (Array.isArray(source)) {
+      source = source[targetLevel] || source[targetLevel - 1] || source[0];
+    } else if (typeof source === "object") {
+      const levelScoped = source[targetLevel] || source[String(targetLevel)];
+      if (levelScoped && typeof levelScoped === "object") {
+        source = levelScoped;
+      }
+    }
+
+    if (!source || typeof source !== "object") {
+      return [];
+    }
+
+    const deps = [];
+    Object.entries(source).forEach(([depKey, depValue]) => {
+      const normalizedKey = normalizeBuildingKey(depKey);
+      if (!normalizedKey || normalizedKey === "not_buildable") {
+        return;
+      }
+      const requiredLevel = pickFirstFiniteNumber(
+        depValue,
+        depValue && depValue.level,
+        depValue && depValue.required_level,
+        depValue && depValue.min_level,
+        Array.isArray(depValue) ? depValue[0] : null
+      );
+      if (requiredLevel === null || requiredLevel <= 0) {
+        return;
+      }
+      deps.push({
+        key: normalizedKey,
+        level: Math.max(1, Math.floor(requiredLevel))
+      });
+    });
+    return deps;
+  }
+
+  function areDependenciesMet(buildingKey, targetLevel, levels) {
+    const entry = getBuildingDataEntry(buildingKey);
+    if (!entry) {
+      return true;
+    }
+
+    const levelConfig = getLevelConfigFromData(entry, targetLevel);
+    const dependencySources = [
+      levelConfig && (levelConfig.dependencies || levelConfig.requirements || levelConfig.required_buildings),
+      entry.dependencies,
+      entry.requirements,
+      entry.required_buildings
+    ];
+
+    const allDeps = [];
+    dependencySources.forEach((source) => {
+      normalizeDependencies(source, targetLevel).forEach((dep) => {
+        allDeps.push(dep);
+      });
+    });
+
+    for (const dep of allDeps) {
+      if (!dep || !dep.key || dep.key === normalizeBuildingKey(buildingKey)) {
+        continue;
+      }
+      const actualLevel = getLevelForBuilding(levels, dep.key);
+      if (actualLevel < dep.level) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function estimateStorageCapacityFromLevel(level, cache) {
+    const safeLevel = Math.max(1, toInt(level, 1));
+    const cacheKey = `storage:${safeLevel}`;
+    if (cache && cache.has(cacheKey)) {
+      return cache.get(cacheKey);
+    }
+
+    const entry = getBuildingDataEntry("storage");
+    if (!entry) {
+      return null;
+    }
+
+    const levelConfig = getLevelConfigFromData(entry, safeLevel);
+    let capacity = pickFirstFiniteNumber(
+      levelConfig && levelConfig.storage,
+      levelConfig && levelConfig.capacity,
+      levelConfig && levelConfig.max_resources,
+      levelConfig && levelConfig.warehouse_capacity
+    );
+
+    if (capacity === null) {
+      const base = pickFirstFiniteNumber(entry.storage, entry.capacity, entry.max_resources, entry.warehouse_capacity);
+      const factor = pickFirstFiniteNumber(entry.storage_factor, entry.capacity_factor, entry.max_resources_factor);
+      if (base !== null) {
+        if (factor !== null && factor > 0) {
+          capacity = base * Math.pow(safeLevel, factor);
+        } else {
+          capacity = base;
+        }
+      }
+    }
+
+    if (capacity === null || capacity <= 0) {
+      return null;
+    }
+
+    const rounded = Math.round(capacity);
+    if (cache) {
+      cache.set(cacheKey, rounded);
+    }
+    return rounded;
+  }
+
+  function getNeutralResourceOutputPerHour(level) {
+    const safeLevel = Math.max(0, toInt(level, 0));
+    const maxKnown = RESOURCE_OUTPUT_PER_HOUR_SPEED1.length - 1;
+    if (safeLevel <= maxKnown) {
+      return RESOURCE_OUTPUT_PER_HOUR_SPEED1[safeLevel];
+    }
+    const overflow = safeLevel - maxKnown;
+    return RESOURCE_OUTPUT_PER_HOUR_SPEED1[maxKnown] + overflow * 11;
+  }
+
+  function estimateResourceRateForLevel(resourceKey, level, worldSpeed, multiplier) {
+    const neutralPerHour = getNeutralResourceOutputPerHour(level) * (worldSpeed > 0 ? worldSpeed : 1);
+    const ratio = multiplier > 0 ? multiplier : 1;
+    return Math.max(0, (neutralPerHour * ratio) / 3600);
+  }
+
+  function estimateWaitSeconds(cost, currentResources, productionPerSecond, storageCapacity) {
+    let waitSeconds = 0;
+    for (const resourceKey of RESOURCE_KEYS) {
+      const needed = Math.max(0, cost[resourceKey] || 0);
+      if (Number.isFinite(storageCapacity) && storageCapacity > 0 && needed > storageCapacity) {
+        return Number.POSITIVE_INFINITY;
+      }
+      const available = Math.max(0, currentResources[resourceKey] || 0);
+      const missing = needed - available;
+      if (missing <= 0) {
+        continue;
+      }
+      const rate = Math.max(0, productionPerSecond[resourceKey] || 0);
+      if (rate <= 0) {
+        return Number.POSITIVE_INFINITY;
+      }
+      waitSeconds = Math.max(waitSeconds, missing / rate);
+    }
+    return waitSeconds;
+  }
+
+  function advanceResources(resources, productionPerSecond, durationSeconds, storageCapacity) {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      return;
+    }
+    RESOURCE_KEYS.forEach((resourceKey) => {
+      const rate = Math.max(0, productionPerSecond[resourceKey] || 0);
+      let value = Math.max(0, resources[resourceKey] || 0) + rate * durationSeconds;
+      if (Number.isFinite(storageCapacity) && storageCapacity > 0) {
+        value = Math.min(value, storageCapacity);
+      }
+      resources[resourceKey] = value;
+    });
+  }
+
+  function computeRemainingDemand(levels, targetMaxByKey, costCache) {
+    const totals = { wood: 0, stone: 0, iron: 0 };
+    Object.entries(targetMaxByKey).forEach(([buildingKey, targetLevel]) => {
+      const currentLevel = getLevelForBuilding(levels, buildingKey);
+      for (let level = currentLevel + 1; level <= targetLevel; level += 1) {
+        const cost = estimateUpgradeCost(buildingKey, level, costCache);
+        if (!cost) {
+          continue;
+        }
+        totals.wood += cost.wood || 0;
+        totals.stone += cost.stone || 0;
+        totals.iron += cost.iron || 0;
+      }
+    });
+    return totals;
+  }
+
+  function computeRemainingBuildSeconds(levels, targetMaxByKey, worldSpeed, timeCache) {
+    let total = 0;
+    const senateLevel = getLevelForBuilding(levels, "main");
+    Object.entries(targetMaxByKey).forEach(([buildingKey, targetLevel]) => {
+      const currentLevel = getLevelForBuilding(levels, buildingKey);
+      for (let level = currentLevel + 1; level <= targetLevel; level += 1) {
+        const seconds = estimateUpgradeBuildSeconds(buildingKey, level, senateLevel, worldSpeed, timeCache);
+        if (seconds && Number.isFinite(seconds)) {
+          total += seconds;
+        }
+      }
+    });
+    return total;
+  }
+
+  function getPriorityPlan(preset, levels, economy) {
+    const fallbackPlan = getSimplePriorityPlan(preset, levels);
+    if (!preset || !levels || !economy) {
+      return fallbackPlan;
+    }
+
+    const order = Array.isArray(preset.priorityOrder) ? preset.priorityOrder : Object.keys(preset.targets);
+    const orderIndex = new Map(order.map((key, index) => [key, index]));
+    const targetMaxByKey = {};
+    Object.entries(preset.targets).forEach(([buildingKey, range]) => {
+      const normalized = normalizeRange(range);
+      if (!normalized) {
+        return;
+      }
+      targetMaxByKey[normalizeBuildingKey(buildingKey)] = normalized[1];
+    });
+
+    if (!Object.keys(targetMaxByKey).length) {
+      return [];
+    }
+
+    const worldSpeed = economy.worldSpeed > 0 ? economy.worldSpeed : getWorldSpeedFactor();
+    const costCache = new Map();
+    const timeCache = new Map();
+    const storageCache = new Map();
+
+    const state = {
+      levels: { ...levels },
+      resources: {
+        wood: Math.max(0, economy.resources.wood || 0),
+        stone: Math.max(0, economy.resources.stone || 0),
+        iron: Math.max(0, economy.resources.iron || 0)
+      },
+      productionPerSecond: {
+        wood: Math.max(0, economy.productionPerSecond.wood || 0),
+        stone: Math.max(0, economy.productionPerSecond.stone || 0),
+        iron: Math.max(0, economy.productionPerSecond.iron || 0)
+      },
+      storageCapacity: Number.isFinite(economy.storageCapacity) && economy.storageCapacity > 0
+        ? economy.storageCapacity
+        : Number.POSITIVE_INFINITY,
+      elapsedSeconds: 0
+    };
+
+    if (typeof state.levels.dock === "number" && typeof state.levels.docks !== "number") {
+      state.levels.docks = state.levels.dock;
+    }
+    if (typeof state.levels.docks === "number" && typeof state.levels.dock !== "number") {
+      state.levels.dock = state.levels.docks;
+    }
+
+    const productionMultipliers = { wood: 1, stone: 1, iron: 1 };
+    RESOURCE_BUILDING_KEYS.forEach((buildingKey) => {
+      const resourceKey = RESOURCE_BUILDING_TO_RESOURCE[buildingKey];
+      const level = getLevelForBuilding(state.levels, buildingKey);
+      const observedPerHour = Math.max(0, (state.productionPerSecond[resourceKey] || 0) * 3600);
+      const neutralPerHour = Math.max(1, getNeutralResourceOutputPerHour(level) * worldSpeed);
+      if (observedPerHour > 0) {
+        productionMultipliers[resourceKey] = Math.min(2.5, Math.max(0.25, observedPerHour / neutralPerHour));
+      }
+      if (state.productionPerSecond[resourceKey] <= 0) {
+        state.productionPerSecond[resourceKey] = estimateResourceRateForLevel(
+          resourceKey,
+          level,
+          worldSpeed,
+          productionMultipliers[resourceKey]
+        );
+      }
+    });
+
+    const plan = [];
+    const maxIterations = 600;
+
+    for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+      const pendingKeys = Object.keys(targetMaxByKey).filter((buildingKey) => {
+        const currentLevel = getLevelForBuilding(state.levels, buildingKey);
+        return currentLevel < targetMaxByKey[buildingKey];
+      });
+
+      if (!pendingKeys.length) {
+        break;
+      }
+
+      const remainingDemand = computeRemainingDemand(state.levels, targetMaxByKey, costCache);
+      const remainingBuildSeconds = computeRemainingBuildSeconds(state.levels, targetMaxByKey, worldSpeed, timeCache);
+      const senateLevel = getLevelForBuilding(state.levels, "main");
+      const candidates = [];
+
+      pendingKeys.forEach((buildingKey) => {
+        const currentLevel = getLevelForBuilding(state.levels, buildingKey);
+        const nextLevel = currentLevel + 1;
+        if (!areDependenciesMet(buildingKey, nextLevel, state.levels)) {
+          return;
+        }
+
+        const cost = estimateUpgradeCost(buildingKey, nextLevel, costCache);
+        const buildSeconds = estimateUpgradeBuildSeconds(buildingKey, nextLevel, senateLevel, worldSpeed, timeCache);
+        if (!cost || !buildSeconds || !Number.isFinite(buildSeconds)) {
+          return;
+        }
+
+        const waitSeconds = estimateWaitSeconds(cost, state.resources, state.productionPerSecond, state.storageCapacity);
+        if (!Number.isFinite(waitSeconds)) {
+          return;
+        }
+
+        const normalizedRange = normalizeRange(preset.targets[buildingKey]) || [0, targetMaxByKey[buildingKey]];
+        const minTarget = normalizedRange[0];
+        const maxTarget = normalizedRange[1];
+        const kind = nextLevel <= minTarget ? "required" : "optional";
+        const baseScore = waitSeconds + buildSeconds;
+        let score = baseScore;
+        const producedResource = RESOURCE_BUILDING_TO_RESOURCE[buildingKey];
+        if (producedResource) {
+          const currentRate = Math.max(0, state.productionPerSecond[producedResource] || 0);
+          const projectedRate = estimateResourceRateForLevel(
+            producedResource,
+            nextLevel,
+            worldSpeed,
+            productionMultipliers[producedResource]
+          );
+          const deltaRate = projectedRate - currentRate;
+          if (deltaRate > 0) {
+            const demandRemaining = Math.max(0, (remainingDemand[producedResource] || 0) - (state.resources[producedResource] || 0));
+            const savingsWindow = Math.min(36 * 3600, remainingBuildSeconds + baseScore);
+            const estimatedSavedSeconds = Math.min(savingsWindow, demandRemaining / deltaRate);
+            score -= estimatedSavedSeconds * 0.35;
+          }
+        }
+
+        candidates.push({
+          key: buildingKey,
+          level: currentLevel,
+          nextLevel,
+          kind,
+          min: minTarget,
+          max: maxTarget,
+          cost,
+          waitSeconds,
+          buildSeconds,
+          score,
+          order: orderIndex.has(buildingKey) ? orderIndex.get(buildingKey) : 9999
+        });
+      });
+
+      if (!candidates.length) {
+        break;
+      }
+
+      candidates.sort((a, b) => {
+        const aGroup = a.kind === "required" ? 0 : 1;
+        const bGroup = b.kind === "required" ? 0 : 1;
+        if (aGroup !== bGroup) {
+          return aGroup - bGroup;
+        }
+        if (a.score !== b.score) {
+          return a.score - b.score;
+        }
+        const aDuration = a.waitSeconds + a.buildSeconds;
+        const bDuration = b.waitSeconds + b.buildSeconds;
+        if (aDuration !== bDuration) {
+          return aDuration - bDuration;
+        }
+        if (a.order !== b.order) {
+          return a.order - b.order;
+        }
+        const aLabel = BUILDING_LABELS[a.key] || a.key;
+        const bLabel = BUILDING_LABELS[b.key] || b.key;
+        return aLabel.localeCompare(bLabel, "fr");
+      });
+
+      const chosen = candidates[0];
+      const duration = chosen.waitSeconds + chosen.buildSeconds;
+      advanceResources(state.resources, state.productionPerSecond, duration, state.storageCapacity);
+      RESOURCE_KEYS.forEach((resourceKey) => {
+        state.resources[resourceKey] = Math.max(0, (state.resources[resourceKey] || 0) - (chosen.cost[resourceKey] || 0));
+      });
+
+      state.levels[chosen.key] = chosen.nextLevel;
+      if (chosen.key === "dock") {
+        state.levels.docks = chosen.nextLevel;
+      } else if (chosen.key === "docks") {
+        state.levels.dock = chosen.nextLevel;
+      }
+
+      if (chosen.key === "storage") {
+        const updatedCapacity = estimateStorageCapacityFromLevel(chosen.nextLevel, storageCache);
+        if (updatedCapacity && Number.isFinite(updatedCapacity) && updatedCapacity > 0) {
+          state.storageCapacity = updatedCapacity;
+        }
+      }
+
+      const producedResource = RESOURCE_BUILDING_TO_RESOURCE[chosen.key];
+      if (producedResource) {
+        state.productionPerSecond[producedResource] = estimateResourceRateForLevel(
+          producedResource,
+          chosen.nextLevel,
+          worldSpeed,
+          productionMultipliers[producedResource]
+        );
+      }
+
+      state.elapsedSeconds += duration;
+      plan.push({
+        key: chosen.key,
+        kind: chosen.kind,
+        level: chosen.level,
+        targetLevel: chosen.nextLevel,
+        min: chosen.min,
+        max: chosen.max,
+        gap: Math.max(0, chosen.max - chosen.nextLevel),
+        order: chosen.order,
+        waitSeconds: chosen.waitSeconds,
+        buildSeconds: chosen.buildSeconds,
+        finishSeconds: state.elapsedSeconds,
+        cost: chosen.cost,
+        simulated: true
+      });
+    }
+
+    return plan.length ? plan : fallbackPlan;
   }
 
   function getSelectedPreset() {
@@ -740,6 +1557,428 @@
     }
 
     return levels;
+  }
+
+  function getTownNumericId(town) {
+    if (!town) {
+      return null;
+    }
+    let townGetterId = null;
+    try {
+      if (typeof town.getId === "function") {
+        townGetterId = town.getId();
+      }
+    } catch (_) {}
+    const id = pickFirstFiniteNumber(
+      town && town.id,
+      town && town.attributes && town.attributes.id,
+      townGetterId
+    );
+    return id !== null ? Number(id) : null;
+  }
+
+  function pushCollectionModels(out, source) {
+    if (!out || !source) {
+      return;
+    }
+    if (Array.isArray(source)) {
+      source.forEach((item) => {
+        if (item && typeof item === "object") {
+          out.push(item);
+        }
+      });
+      return;
+    }
+    if (source.models && Array.isArray(source.models)) {
+      source.models.forEach((item) => {
+        if (item && typeof item === "object") {
+          out.push(item);
+        }
+      });
+      return;
+    }
+    if (source.attributes && Array.isArray(source.attributes)) {
+      source.attributes.forEach((item) => {
+        if (item && typeof item === "object") {
+          out.push(item);
+        }
+      });
+      return;
+    }
+    if (source.attributes && typeof source.attributes === "object") {
+      Object.values(source.attributes).forEach((value) => {
+        if (value && typeof value === "object" && value.building_type) {
+          out.push(value);
+        }
+      });
+    }
+  }
+
+  function extractOrderFromRawModel(raw, townId, levels, strictTownFilter) {
+    const attrs = raw && raw.attributes && typeof raw.attributes === "object"
+      ? raw.attributes
+      : raw;
+    if (!attrs || typeof attrs !== "object") {
+      return null;
+    }
+
+    const orderTownId = pickFirstFiniteNumber(attrs.town_id, attrs.townId, attrs.tid);
+    if (townId !== null && orderTownId !== null && Number(orderTownId) !== townId) {
+      return null;
+    }
+    if (strictTownFilter && townId !== null && orderTownId === null) {
+      return null;
+    }
+
+    const isTearDown = Boolean(
+      attrs.tear_down ||
+      attrs.tearDown ||
+      attrs.demolish ||
+      attrs.destroy ||
+      attrs.is_teardown
+    );
+    if (isTearDown) {
+      return null;
+    }
+
+    const rawKey = attrs.building_type || attrs.building || attrs.type || attrs.item_name || attrs.name;
+    const key = normalizeBuildingKey(rawKey);
+    if (!key || !KNOWN_BUILDING_KEYS.includes(key)) {
+      return null;
+    }
+
+    let targetLevel = toInt(
+      pickFirstFiniteNumber(attrs.level, attrs.target_level, attrs.next_level, attrs.to_level),
+      0
+    );
+    if (targetLevel <= 0) {
+      targetLevel = Math.max(1, getLevelForBuilding(levels, key) + 1);
+    }
+
+    const queuePos = toInt(
+      pickFirstFiniteNumber(attrs.queue_pos, attrs.queue_position, attrs.queue_order, attrs.sort_order),
+      9999
+    );
+
+    let remainingSeconds = pickFirstFiniteNumber(
+      attrs.seconds_left,
+      attrs.time_left,
+      attrs.remaining,
+      attrs.remaining_seconds,
+      attrs.countdown
+    );
+
+    const finishedAt = pickFirstFiniteNumber(attrs.completed_at, attrs.finished_at, attrs.ends_at, attrs.done_at);
+    if ((remainingSeconds === null || remainingSeconds < 0) && finishedAt !== null) {
+      const nowTs = pickFirstFiniteNumber(
+        uw.Timestamp && uw.Timestamp.server,
+        uw.Game && uw.Game.server_timestamp,
+        uw.Game && uw.Game.timestamp
+      );
+      if (nowTs !== null) {
+        remainingSeconds = Math.max(0, finishedAt - nowTs);
+      }
+    }
+
+    const uid = attrs.id || attrs.order_id || `${key}:${targetLevel}:${queuePos}`;
+    return {
+      id: String(uid),
+      key,
+      targetLevel,
+      queuePos,
+      remainingSeconds: remainingSeconds !== null ? Math.max(0, Number(remainingSeconds)) : null
+    };
+  }
+
+  function getTownBuildingOrders(town, levels) {
+    if (!town || !levels) {
+      return [];
+    }
+
+    const townScopedModels = [];
+    const globalModels = [];
+    const visited = new Set();
+    const townId = getTownNumericId(town);
+
+    const townMethods = [
+      "buildingOrders",
+      "building_orders",
+      "buildingorders",
+      "buildingOrder",
+      "building_order",
+      "buildOrders"
+    ];
+
+    townMethods.forEach((methodName) => {
+      try {
+        if (typeof town[methodName] === "function") {
+          pushCollectionModels(townScopedModels, town[methodName]());
+        }
+      } catch (_) {}
+    });
+
+    if (town.attributes && typeof town.attributes === "object") {
+      pushCollectionModels(townScopedModels, town.attributes.building_orders);
+      pushCollectionModels(townScopedModels, town.attributes.build_orders);
+    }
+
+    try {
+      if (uw.MM) {
+        const playerId = uw.Game && uw.Game.player_id;
+        const collectionNames = ["BuildingOrder", "BuildingOrders", "Building_Order"];
+        collectionNames.forEach((name) => {
+          try {
+            if (typeof uw.MM.getOnlyCollectionByName === "function") {
+              pushCollectionModels(globalModels, uw.MM.getOnlyCollectionByName(name));
+            }
+          } catch (_) {}
+          try {
+            if (typeof uw.MM.getOnlyCollectionByNameAndPlayerId === "function" && playerId !== undefined && playerId !== null) {
+              pushCollectionModels(globalModels, uw.MM.getOnlyCollectionByNameAndPlayerId(name, playerId));
+            }
+          } catch (_) {}
+          try {
+            if (typeof uw.MM.getCollections === "function") {
+              const collections = uw.MM.getCollections();
+              if (collections && typeof collections === "object") {
+                pushCollectionModels(globalModels, collections[name]);
+              }
+            }
+          } catch (_) {}
+        });
+      }
+    } catch (_) {}
+
+    const orders = [];
+    townScopedModels.forEach((raw) => {
+      const parsed = extractOrderFromRawModel(raw, townId, levels, false);
+      if (!parsed) {
+        return;
+      }
+      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}`;
+      if (visited.has(key)) {
+        return;
+      }
+      visited.add(key);
+      orders.push(parsed);
+    });
+
+    globalModels.forEach((raw) => {
+      const parsed = extractOrderFromRawModel(raw, townId, levels, true);
+      if (!parsed) {
+        return;
+      }
+      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}`;
+      if (visited.has(key)) {
+        return;
+      }
+      visited.add(key);
+      orders.push(parsed);
+    });
+
+    orders.sort((a, b) => {
+      if (a.queuePos !== b.queuePos) {
+        return a.queuePos - b.queuePos;
+      }
+      const aRem = Number.isFinite(a.remainingSeconds) ? a.remainingSeconds : Number.POSITIVE_INFINITY;
+      const bRem = Number.isFinite(b.remainingSeconds) ? b.remainingSeconds : Number.POSITIVE_INFINITY;
+      if (aRem !== bRem) {
+        return aRem - bRem;
+      }
+      return a.key.localeCompare(b.key, "fr");
+    });
+
+    return orders;
+  }
+
+  function applyBuildingOrdersToLevels(levels, buildingOrders) {
+    const virtualLevels = { ...(levels || {}) };
+    if (!virtualLevels || !buildingOrders || !buildingOrders.length) {
+      return virtualLevels;
+    }
+
+    buildingOrders.forEach((order) => {
+      if (!order || !order.key) {
+        return;
+      }
+      const current = getLevelForBuilding(virtualLevels, order.key);
+      const next = Math.max(current + 1, toInt(order.targetLevel, current + 1));
+      virtualLevels[order.key] = next;
+      if (order.key === "dock") {
+        virtualLevels.docks = next;
+      } else if (order.key === "docks") {
+        virtualLevels.dock = next;
+      }
+    });
+
+    return virtualLevels;
+  }
+
+  function collectNumericEntries(out, source) {
+    if (!out || !source || typeof source !== "object") {
+      return;
+    }
+    Object.entries(source).forEach(([key, value]) => {
+      const parsed = readLooseNumber(value);
+      if (parsed !== null && Number.isFinite(parsed)) {
+        out[key] = parsed;
+      }
+    });
+  }
+
+  function readNumberFromModel(model, key) {
+    if (!model || !key) {
+      return null;
+    }
+    if (model.attributes && model.attributes[key] !== undefined) {
+      const parsed = readLooseNumber(model.attributes[key]);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+    if (model[key] !== undefined) {
+      const parsed = readLooseNumber(model[key]);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+    if (typeof model.get === "function") {
+      try {
+        const parsed = readLooseNumber(model.get(key));
+        if (parsed !== null) {
+          return parsed;
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function normalizeProductionPerSecond(value) {
+    if (!Number.isFinite(value) || value <= 0) {
+      return 0;
+    }
+    // Grepolis models usually expose hourly production; small values are often already /s.
+    return value > 5 ? value / 3600 : value;
+  }
+
+  function extractTownEconomy(town, levels) {
+    const worldSpeed = getWorldSpeedFactor();
+    const resources = { wood: 0, stone: 0, iron: 0 };
+    const productionPerSecond = { wood: 0, stone: 0, iron: 0 };
+    let storageCapacity = null;
+
+    if (!town) {
+      return {
+        resources,
+        productionPerSecond,
+        storageCapacity,
+        worldSpeed
+      };
+    }
+
+    let resourcesModel = null;
+    const amountData = {};
+    const productionData = {};
+
+    try {
+      if (typeof town.resources === "function") {
+        resourcesModel = town.resources();
+      }
+    } catch (_) {}
+
+    collectNumericEntries(amountData, resourcesModel);
+    collectNumericEntries(amountData, resourcesModel && resourcesModel.attributes);
+    collectNumericEntries(amountData, town.attributes && town.attributes.resources);
+
+    try {
+      if (resourcesModel && typeof resourcesModel.getProduction === "function") {
+        collectNumericEntries(productionData, resourcesModel.getProduction());
+      }
+    } catch (_) {}
+    try {
+      if (typeof town.getProduction === "function") {
+        collectNumericEntries(productionData, town.getProduction());
+      }
+    } catch (_) {}
+    collectNumericEntries(productionData, resourcesModel && resourcesModel.production);
+    collectNumericEntries(productionData, resourcesModel && resourcesModel.attributes && resourcesModel.attributes.production);
+
+    const amountKeys = {
+      wood: ["wood", "wood_amount", "resource_wood"],
+      stone: ["stone", "stone_amount", "resource_stone"],
+      iron: ["iron", "iron_amount", "silver", "resource_iron"]
+    };
+    const productionKeys = {
+      wood: ["wood_production", "production_wood", "wood_prod", "wood_per_hour", "wood_rate", "wood"],
+      stone: ["stone_production", "production_stone", "stone_prod", "stone_per_hour", "stone_rate", "stone"],
+      iron: ["iron_production", "production_iron", "iron_prod", "iron_per_hour", "iron_rate", "iron", "silver_production"]
+    };
+
+    RESOURCE_KEYS.forEach((resourceKey) => {
+      const amount = pickFirstFiniteNumber(
+        ...amountKeys[resourceKey].map((key) => amountData[key]),
+        ...amountKeys[resourceKey].map((key) => readNumberFromModel(resourcesModel, key))
+      );
+      resources[resourceKey] = Math.max(0, amount || 0);
+
+      const production = pickFirstFiniteNumber(
+        ...productionKeys[resourceKey].map((key) => productionData[key]),
+        ...productionKeys[resourceKey].map((key) => readNumberFromModel(resourcesModel, key))
+      );
+      productionPerSecond[resourceKey] = normalizeProductionPerSecond(production || 0);
+    });
+
+    storageCapacity = pickFirstFiniteNumber(
+      amountData.storage,
+      amountData.storage_capacity,
+      amountData.warehouse_capacity,
+      amountData.max_resources,
+      readNumberFromModel(resourcesModel, "storage"),
+      readNumberFromModel(resourcesModel, "storage_capacity"),
+      readNumberFromModel(resourcesModel, "warehouse_capacity")
+    );
+
+    if (storageCapacity === null || storageCapacity <= 0) {
+      const storageLevel = getLevelForBuilding(levels, "storage");
+      storageCapacity = estimateStorageCapacityFromLevel(storageLevel, new Map());
+    }
+
+    RESOURCE_BUILDING_KEYS.forEach((buildingKey) => {
+      const resourceKey = RESOURCE_BUILDING_TO_RESOURCE[buildingKey];
+      if ((productionPerSecond[resourceKey] || 0) > 0) {
+        return;
+      }
+      const level = getLevelForBuilding(levels, buildingKey);
+      productionPerSecond[resourceKey] = estimateResourceRateForLevel(resourceKey, level, worldSpeed, 1);
+    });
+
+    return {
+      resources,
+      productionPerSecond,
+      storageCapacity: Number.isFinite(storageCapacity) && storageCapacity > 0 ? storageCapacity : null,
+      worldSpeed
+    };
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return "-";
+    }
+    const rounded = Math.max(0, Math.round(seconds));
+    const days = Math.floor(rounded / 86400);
+    const hours = Math.floor((rounded % 86400) / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const secs = rounded % 60;
+    if (days > 0) {
+      return `${days}j ${hours}h`;
+    }
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    if (minutes > 0) {
+      return `${minutes}m ${secs}s`;
+    }
+    return `${secs}s`;
   }
 
   function formatTarget(range) {
@@ -1000,14 +2239,20 @@
       <div class="tm-town-name">Ville active</div>
       <div class="tm-next-action"></div>
       <div class="tm-special-building"></div>
+      <div class="tm-plan-preview"></div>
       <div class="tm-body">
         <table>
           <thead>
-            <tr><th>Prio</th><th>Batiment</th><th>Etat</th><th>Cible</th></tr>
+            <tr>
+              <th class="tm-col-prio">Prio</th>
+              <th class="tm-col-building">Batiment</th>
+              <th class="tm-col-state">Etat</th>
+              <th class="tm-col-target">Cible</th>
+            </tr>
           </thead>
           <tbody class="tm-rows"></tbody>
         </table>
-        <p class="tm-hint">MAJ auto. Passe en "Personnalise" pour modifier tes objectifs. Glisse l'entete pour deplacer, redimensionne au coin bas-droit.</p>
+        <p class="tm-hint">MAJ auto. Ordre simule avec couts/temps/ressources. Passe en "Personnalise" pour modifier tes objectifs.</p>
       </div>
     `;
 
@@ -1261,6 +2506,7 @@
       #${PANEL_ID} .tm-town-name,
       #${PANEL_ID} .tm-next-action,
       #${PANEL_ID} .tm-special-building,
+      #${PANEL_ID} .tm-plan-preview,
       #${PANEL_ID} .tm-hint {
         padding: 8px 10px;
       }
@@ -1331,6 +2577,13 @@
         border-bottom: 1px solid rgba(255, 255, 255, 0.12);
       }
 
+      #${PANEL_ID} .tm-plan-preview {
+        color: #d9ecff;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+
       #${PANEL_ID} .tm-body {
         padding-bottom: 8px;
       }
@@ -1397,6 +2650,7 @@
       #${PANEL_ID}.tm-collapsed .tm-controls,
       #${PANEL_ID}.tm-collapsed .tm-next-action,
       #${PANEL_ID}.tm-collapsed .tm-special-building,
+      #${PANEL_ID}.tm-collapsed .tm-plan-preview,
       #${PANEL_ID}.tm-collapsed .tm-town-name {
         display: none;
       }
@@ -1434,10 +2688,18 @@
     const preset = getPresetConfig(presetKey);
     const town = getTown();
     const levels = extractBuildingLevels(town);
+    const buildingOrders = getTownBuildingOrders(town, levels);
+    const projectedLevels = applyBuildingOrdersToLevels(levels, buildingOrders);
+    const economy = extractTownEconomy(town, levels);
     const rowsEl = panel.querySelector(".tm-rows");
     const townNameEl = panel.querySelector(".tm-town-name");
     const nextActionEl = panel.querySelector(".tm-next-action");
     const specialEl = panel.querySelector(".tm-special-building");
+    const planPreviewEl = panel.querySelector(".tm-plan-preview");
+    const colPrioEl = panel.querySelector(".tm-col-prio");
+    const colBuildingEl = panel.querySelector(".tm-col-building");
+    const colStateEl = panel.querySelector(".tm-col-state");
+    const colTargetEl = panel.querySelector(".tm-col-target");
     const worldSelect = panel.querySelector(".tm-world-select");
     const select = panel.querySelector(".tm-preset-select");
 
@@ -1451,8 +2713,13 @@
     }
     updateActions(panel, preset);
 
-    if (!levels || !preset || !rowsEl || !townNameEl || !nextActionEl || !specialEl) {
+    if (!preset || !rowsEl || !townNameEl || !nextActionEl || !specialEl || !planPreviewEl) {
+      return;
+    }
+
+    if (!levels) {
       rowsEl.innerHTML = `<tr><td colspan="4" class="tm-neutral">Impossible de lire les batiments. Ouvre une ville et attends 1-2 secondes.</td></tr>`;
+      planPreviewEl.textContent = "Ordre niveau par niveau: en attente des donnees de ville.";
       return;
     }
 
@@ -1468,8 +2735,19 @@
       edit: isCustomEditMode,
       order: preset.priorityOrder,
       special: preset.specialBuilding,
-      values: Object.keys(preset.targets).map((key) => getLevelForBuilding(levels, key)),
-      targets: preset.targets
+      values: Object.keys(preset.targets).map((key) => getLevelForBuilding(projectedLevels, key)),
+      targets: preset.targets,
+      queue: buildingOrders.map((order) => [order.key, order.targetLevel, Math.round(order.remainingSeconds || -1)]),
+      resources: economy
+        ? [
+            Math.floor(economy.resources.wood || 0),
+            Math.floor(economy.resources.stone || 0),
+            Math.floor(economy.resources.iron || 0),
+            Math.round((economy.productionPerSecond.wood || 0) * 1000) / 1000,
+            Math.round((economy.productionPerSecond.stone || 0) * 1000) / 1000,
+            Math.round((economy.productionPerSecond.iron || 0) * 1000) / 1000
+          ]
+        : null
     });
 
     if (!force && signature === lastSignature) {
@@ -1480,39 +2758,170 @@
     townNameEl.textContent = townName;
     rowsEl.innerHTML = "";
 
-    const plan = getPriorityPlan(preset, levels);
+    const plan = getPriorityPlan(preset, projectedLevels, economy);
+    const hasSimulation = plan.some((item) => item && item.simulated);
     const priorityByKey = new Map();
     plan.forEach((item, index) => {
-      priorityByKey.set(item.key, {
-        rank: index + 1,
-        kind: item.kind
-      });
+      if (!priorityByKey.has(item.key)) {
+        priorityByKey.set(item.key, {
+          rank: index + 1,
+          kind: item.kind,
+          targetLevel: item.targetLevel,
+          finishSeconds: item.finishSeconds
+        });
+      }
     });
 
-    if (plan.length) {
-      const first = plan[0];
+    const first = plan.length ? plan[0] : null;
+    const currentOrder = buildingOrders.length ? buildingOrders[0] : null;
+    if (currentOrder) {
+      const currentName = BUILDING_LABELS[currentOrder.key] || currentOrder.key;
+      const currentFrom = Math.max(0, currentOrder.targetLevel - 1);
+      const currentRemaining = Number.isFinite(currentOrder.remainingSeconds)
+        ? ` (reste ${formatDuration(currentOrder.remainingSeconds)})`
+        : "";
+      if (first) {
+        const firstName = BUILDING_LABELS[first.key] || first.key;
+        const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}. Prochain: ${firstName} -> niv ${firstTarget}.`;
+      } else {
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}. Ensuite: template atteint.`;
+      }
+    } else if (first) {
       const firstName = BUILDING_LABELS[first.key] || first.key;
-      const firstTarget = first.kind === "required" ? first.min : first.max;
+      const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
       const firstTag = first.kind === "required" ? "obligatoire" : "optimisation";
-      nextActionEl.textContent = `Action maintenant: #1 ${firstName} -> viser niv ${firstTarget} (${firstTag})`;
+      if (hasSimulation) {
+        const waitText = first.waitSeconds > 0 ? `attente ${formatDuration(first.waitSeconds)}` : "demarrage immediat";
+        const buildText = first.buildSeconds > 0 ? `chantier ${formatDuration(first.buildSeconds)}` : "chantier court";
+        nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | ${waitText}, ${buildText}`;
+      } else {
+        nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | mode simplifie`;
+      }
     } else {
-      nextActionEl.textContent = "Action maintenant: aucun batiment prioritaire (template atteint).";
+      nextActionEl.textContent = "Aucune action batiment: template atteint.";
+    }
+
+    if (buildingOrders.length) {
+      const queueText = buildingOrders
+        .slice(0, 3)
+        .map((order, index) => {
+          const name = BUILDING_LABELS[order.key] || order.key;
+          const suffix = Number.isFinite(order.remainingSeconds) && index === 0
+            ? ` (${formatDuration(order.remainingSeconds)})`
+            : "";
+          return `${index + 1}.${name} ${order.targetLevel}${suffix}`;
+        })
+        .join(" | ");
+      const extra = buildingOrders.length > 3 ? ` | +${buildingOrders.length - 3} en file` : "";
+      planPreviewEl.textContent = `File construction: ${queueText}${extra}`;
+    } else if (first) {
+      const firstName = BUILDING_LABELS[first.key] || first.key;
+      const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
+      planPreviewEl.textContent = `Prochaine construction: ${firstName} -> niv ${firstTarget}`;
+    } else {
+      planPreviewEl.textContent = "File construction: vide.";
     }
 
     const special = preset.specialBuilding || inferSpecialBuilding(preset.targets);
     if (special && special.key) {
       const specialRange = normalizeRange(special.target) || normalizeRange(preset.targets[special.key]) || [1, 1];
-      const specialLevel = getLevelForBuilding(levels, special.key);
+      const specialLevel = getLevelForBuilding(projectedLevels, special.key);
       const specialName = BUILDING_LABELS[special.key] || special.key;
       const specialStatus = specialLevel < specialRange[0]
         ? "a construire maintenant"
         : specialLevel < specialRange[1]
           ? "a poursuivre"
           : "ok";
-      specialEl.textContent = `Batiment special: ${specialName} (${specialLevel}/${formatTarget(specialRange)}) - ${specialStatus}`;
+      const remainingText = hasSimulation && plan.length
+        ? ` | ${plan.length} niveau(x) restant(s)`
+        : "";
+      specialEl.textContent = `Batiment special: ${specialName} (${specialLevel}/${formatTarget(specialRange)}) - ${specialStatus}${remainingText}`;
     } else {
       specialEl.textContent = "Batiment special: non defini pour ce preset.";
     }
+
+    const isEditingCustom = preset.isCustom && isCustomEditMode;
+    if (!isEditingCustom) {
+      if (colPrioEl) colPrioEl.textContent = "Moment";
+      if (colBuildingEl) colBuildingEl.textContent = "Batiment";
+      if (colStateEl) colStateEl.textContent = "Action";
+      if (colTargetEl) colTargetEl.textContent = "Detail";
+
+      const addDecisionRow = (moment, buildingKey, actionText, detailText, cls) => {
+        const row = document.createElement("tr");
+
+        const momentCell = document.createElement("td");
+        momentCell.className = "tm-prio-cell";
+        momentCell.textContent = moment;
+
+        const nameCell = document.createElement("td");
+        const wrap = document.createElement("div");
+        wrap.className = "tm-building-cell";
+        const iconUrl = getIconUrl(buildingKey);
+        if (iconUrl) {
+          const img = document.createElement("img");
+          img.className = "tm-building-icon";
+          img.alt = "";
+          img.loading = "lazy";
+          img.decoding = "async";
+          img.src = iconUrl;
+          img.addEventListener("error", () => {
+            img.style.display = "none";
+          });
+          wrap.appendChild(img);
+        }
+        const nameText = document.createElement("span");
+        nameText.textContent = BUILDING_LABELS[buildingKey] || buildingKey;
+        wrap.appendChild(nameText);
+        nameCell.appendChild(wrap);
+
+        const actionCell = document.createElement("td");
+        actionCell.className = cls || "tm-neutral";
+        actionCell.textContent = actionText;
+
+        const detailCell = document.createElement("td");
+        detailCell.textContent = detailText;
+
+        row.appendChild(momentCell);
+        row.appendChild(nameCell);
+        row.appendChild(actionCell);
+        row.appendChild(detailCell);
+        rowsEl.appendChild(row);
+      };
+
+      if (currentOrder) {
+        const fromLevel = Math.max(0, currentOrder.targetLevel - 1);
+        const detail = Number.isFinite(currentOrder.remainingSeconds)
+          ? `reste ${formatDuration(currentOrder.remainingSeconds)}`
+          : "temps restant inconnu";
+        addDecisionRow("En cours", currentOrder.key, `Niv ${fromLevel} -> ${currentOrder.targetLevel}`, detail, "tm-mid");
+      }
+
+      if (first) {
+        const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
+        const firstKindLabel = first.kind === "required" ? "obligatoire" : "optimisation";
+        const when = currentOrder ? "Ensuite" : "Maintenant";
+        const detail = hasSimulation
+          ? `att ${formatDuration(first.waitSeconds)} | build ${formatDuration(first.buildSeconds)}`
+          : "mode simplifie";
+        addDecisionRow(when, first.key, `Niv ${first.level} -> ${firstTarget} (${firstKindLabel})`, detail, first.kind === "required" ? "tm-low" : "tm-mid");
+      } else if (!currentOrder) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 4;
+        cell.className = "tm-ok";
+        cell.textContent = "Template atteint: rien a construire.";
+        row.appendChild(cell);
+        rowsEl.appendChild(row);
+      }
+      return;
+    }
+
+    if (colPrioEl) colPrioEl.textContent = "Prio";
+    if (colBuildingEl) colBuildingEl.textContent = "Batiment";
+    if (colStateEl) colStateEl.textContent = "Etat";
+    if (colTargetEl) colTargetEl.textContent = "Cible";
 
     const orderIndex = new Map((preset.priorityOrder || []).map((key, index) => [key, index]));
     const targetEntries = Object.entries(preset.targets).sort((a, b) => {
@@ -1542,7 +2951,7 @@
       prioCell.className = "tm-prio-cell";
       const prioInfo = priorityByKey.get(buildingKey);
       if (prioInfo) {
-        prioCell.textContent = `#${prioInfo.rank}${prioInfo.kind === "optional" ? " opt" : ""}`;
+        prioCell.textContent = `#${prioInfo.rank} -> ${prioInfo.targetLevel}${prioInfo.kind === "optional" ? " opt" : ""}`;
       } else {
         prioCell.textContent = "-";
       }
@@ -1573,33 +2982,29 @@
       stateCell.textContent = status.text;
 
       const targetCell = document.createElement("td");
-      if (preset.isCustom && isCustomEditMode) {
-        const targetWrap = document.createElement("div");
-        targetWrap.className = "tm-target-inputs";
-        targetWrap.setAttribute("data-building-key", buildingKey);
+      const targetWrap = document.createElement("div");
+      targetWrap.className = "tm-target-inputs";
+      targetWrap.setAttribute("data-building-key", buildingKey);
 
-        const minInput = document.createElement("input");
-        minInput.type = "number";
-        minInput.className = "tm-min";
-        minInput.min = "0";
-        minInput.value = String(range[0]);
+      const minInput = document.createElement("input");
+      minInput.type = "number";
+      minInput.className = "tm-min";
+      minInput.min = "0";
+      minInput.value = String(range[0]);
 
-        const sep = document.createElement("span");
-        sep.textContent = "-";
+      const sep = document.createElement("span");
+      sep.textContent = "-";
 
-        const maxInput = document.createElement("input");
-        maxInput.type = "number";
-        maxInput.className = "tm-max";
-        maxInput.min = "0";
-        maxInput.value = String(range[1]);
+      const maxInput = document.createElement("input");
+      maxInput.type = "number";
+      maxInput.className = "tm-max";
+      maxInput.min = "0";
+      maxInput.value = String(range[1]);
 
-        targetWrap.appendChild(minInput);
-        targetWrap.appendChild(sep);
-        targetWrap.appendChild(maxInput);
-        targetCell.appendChild(targetWrap);
-      } else {
-        targetCell.textContent = formatTarget(range);
-      }
+      targetWrap.appendChild(minInput);
+      targetWrap.appendChild(sep);
+      targetWrap.appendChild(maxInput);
+      targetCell.appendChild(targetWrap);
 
       row.appendChild(prioCell);
       row.appendChild(nameCell);
