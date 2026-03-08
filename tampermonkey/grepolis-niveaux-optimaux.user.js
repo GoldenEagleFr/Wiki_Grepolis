@@ -1864,7 +1864,7 @@
 
   function applyBuildingOrdersToLevels(levels, buildingOrders) {
     const virtualLevels = { ...(levels || {}) };
-    if (!virtualLevels || !buildingOrders || !buildingOrders.length) {
+    if (!buildingOrders || !buildingOrders.length) {
       return virtualLevels;
     }
 
@@ -2573,53 +2573,53 @@
     const applyBtn = panel.querySelector(".tm-apply-btn");
     if (applyBtn) {
       applyBtn.addEventListener("click", () => {
-      const wrappers = Array.from(panel.querySelectorAll(".tm-target-inputs[data-building-key]"));
-      if (!wrappers.length) {
-        return;
-      }
-
-      const currentConfig = getPresetConfig(getSelectedPreset());
-      const wrapByKey = new Map();
-      wrappers.forEach((wrap) => {
-        const key = wrap.getAttribute("data-building-key");
-        if (key) {
-          wrapByKey.set(key, wrap);
-        }
-      });
-
-      const nextTargets = {};
-      const orderedKeys = Object.keys(currentConfig.targets);
-      const allKeys = orderedKeys.concat(
-        Array.from(wrapByKey.keys()).filter((key) => !orderedKeys.includes(key))
-      );
-
-      allKeys.forEach((buildingKey) => {
-        const wrap = wrapByKey.get(buildingKey);
-        if (!wrap) {
-          return;
-        }
-        const minInput = wrap.querySelector(".tm-min");
-        const maxInput = wrap.querySelector(".tm-max");
-        if (!minInput || !maxInput) {
+        const wrappers = Array.from(panel.querySelectorAll(".tm-target-inputs[data-building-key]"));
+        if (!wrappers.length) {
           return;
         }
 
-        let min = toInt(minInput.value, 0);
-        let max = toInt(maxInput.value, min);
-        if (max < min) {
-          const tmp = min;
-          min = max;
-          max = tmp;
+        const currentConfig = getPresetConfig(getSelectedPreset());
+        const wrapByKey = new Map();
+        wrappers.forEach((wrap) => {
+          const key = wrap.getAttribute("data-building-key");
+          if (key) {
+            wrapByKey.set(key, wrap);
+          }
+        });
+
+        const nextTargets = {};
+        const orderedKeys = Object.keys(currentConfig.targets);
+        const allKeys = orderedKeys.concat(
+          Array.from(wrapByKey.keys()).filter((key) => !orderedKeys.includes(key))
+        );
+
+        allKeys.forEach((buildingKey) => {
+          const wrap = wrapByKey.get(buildingKey);
+          if (!wrap) {
+            return;
+          }
+          const minInput = wrap.querySelector(".tm-min");
+          const maxInput = wrap.querySelector(".tm-max");
+          if (!minInput || !maxInput) {
+            return;
+          }
+
+          let min = toInt(minInput.value, 0);
+          let max = toInt(maxInput.value, min);
+          if (max < min) {
+            const tmp = min;
+            min = max;
+            max = tmp;
+          }
+          nextTargets[buildingKey] = [min, max];
+        });
+
+        if (!Object.keys(nextTargets).length) {
+          return;
         }
-        nextTargets[buildingKey] = [min, max];
-      });
 
-      if (!Object.keys(nextTargets).length) {
-        return;
-      }
-
-      saveCustomTargets(nextTargets);
-      isCustomEditMode = false;
+        saveCustomTargets(nextTargets);
+        isCustomEditMode = false;
         safeRender(true);
       });
     }
