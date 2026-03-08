@@ -1,4 +1,4 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         Grepolis - Niveaux optimaux de batiments
 // @namespace    https://github.com/GoldenEagleFr/Wiki_Grepolis
 // @version      1.4.0
@@ -1637,6 +1637,29 @@
       });
       return;
     }
+    if (typeof source.toArray === "function") {
+      try {
+        const list = source.toArray();
+        if (Array.isArray(list)) {
+          pushCollectionModels(out, list);
+          return;
+        }
+      } catch (_) {}
+    }
+    if (typeof source.each === "function") {
+      try {
+        const list = [];
+        source.each((item) => {
+          if (item && typeof item === "object") {
+            list.push(item);
+          }
+        });
+        if (list.length) {
+          pushCollectionModels(out, list);
+          return;
+        }
+      } catch (_) {}
+    }
     if (source.models && Array.isArray(source.models)) {
       source.models.forEach((item) => {
         if (item && typeof item === "object") {
@@ -1655,7 +1678,7 @@
     }
     if (source.attributes && typeof source.attributes === "object") {
       Object.values(source.attributes).forEach((value) => {
-        if (value && typeof value === "object" && value.building_type) {
+        if (value && typeof value === "object" && (value.building_type || (value.attributes && value.attributes.building_type))) {
           out.push(value);
         }
       });
@@ -1845,21 +1868,146 @@
       return virtualLevels;
     }
 
+    const queuedCountByKey = new Map();
     buildingOrders.forEach((order) => {
       if (!order || !order.key) {
         return;
       }
-      const current = getLevelForBuilding(virtualLevels, order.key);
-      const next = Math.max(current + 1, toInt(order.targetLevel, current + 1));
-      virtualLevels[order.key] = next;
-      if (order.key === "dock") {
+      const key = normalizeBuildingKey(order.key);
+      if (!KNOWN_BUILDING_KEYS.includes(key)) {
+        return;
+      }
+      queuedCountByKey.set(key, (queuedCountByKey.get(key) || 0) + 1);
+    });
+
+    queuedCountByKey.forEach((count, key) => {
+      const current = getLevelForBuilding(virtualLevels, key);
+      const next = Math.max(0, current + count);
+      virtualLevels[key] = next;
+      if (key === "dock") {
         virtualLevels.docks = next;
-      } else if (order.key === "docks") {
+      } else if (key === "docks") {
         virtualLevels.dock = next;
       }
     });
 
     return virtualLevels;
+  }
+
+  function projectTownStateAfterOrders(levels, economy, buildingOrders) {
+    const projectedLevels = applyBuildingOrdersToLevels(levels, buildingOrders);
+    if (!economy || !buildingOrders || !buildingOrders.length) {
+      return {
+        levels: projectedLevels,
+        economy,
+        queueDurationSeconds: 0
+      };
+    }
+
+    const worldSpeed = economy.worldSpeed > 0 ? economy.worldSpeed : getWorldSpeedFactor();
+    const simLevels = { ...(levels || {}) };
+    const resources = {
+      wood: Math.max(0, economy.resources.wood || 0),
+      stone: Math.max(0, economy.resources.stone || 0),
+      iron: Math.max(0, economy.resources.iron || 0)
+    };
+    const productionPerSecond = {
+      wood: Math.max(0, economy.productionPerSecond.wood || 0),
+      stone: Math.max(0, economy.productionPerSecond.stone || 0),
+      iron: Math.max(0, economy.productionPerSecond.iron || 0)
+    };
+    let storageCapacity = Number.isFinite(economy.storageCapacity) && economy.storageCapacity > 0
+      ? economy.storageCapacity
+      : estimateStorageCapacityFromLevel(getLevelForBuilding(simLevels, "storage"), new Map());
+
+    const productionMultipliers = { wood: 1, stone: 1, iron: 1 };
+    RESOURCE_BUILDING_KEYS.forEach((buildingKey) => {
+      const resourceKey = RESOURCE_BUILDING_TO_RESOURCE[buildingKey];
+      const level = getLevelForBuilding(simLevels, buildingKey);
+      const observedPerHour = Math.max(0, (productionPerSecond[resourceKey] || 0) * 3600);
+      const neutralPerHour = Math.max(1, getNeutralResourceOutputPerHour(level) * worldSpeed);
+      if (observedPerHour > 0) {
+        productionMultipliers[resourceKey] = Math.min(2.5, Math.max(0.25, observedPerHour / neutralPerHour));
+      }
+      if ((productionPerSecond[resourceKey] || 0) <= 0) {
+        productionPerSecond[resourceKey] = estimateResourceRateForLevel(
+          resourceKey,
+          level,
+          worldSpeed,
+          productionMultipliers[resourceKey]
+        );
+      }
+    });
+
+    const timeCache = new Map();
+    const storageCache = new Map();
+    let elapsedSeconds = 0;
+
+    buildingOrders.forEach((order, index) => {
+      if (!order || !order.key) {
+        return;
+      }
+      const key = normalizeBuildingKey(order.key);
+      if (!KNOWN_BUILDING_KEYS.includes(key)) {
+        return;
+      }
+
+      const currentLevel = getLevelForBuilding(simLevels, key);
+      const nextLevel = currentLevel + 1;
+      const senateLevel = getLevelForBuilding(simLevels, "main");
+      const estimatedSeconds = estimateUpgradeBuildSeconds(key, nextLevel, senateLevel, worldSpeed, timeCache);
+      const queueRemaining = pickFirstFiniteNumber(order.remainingSeconds);
+      const hasEstimated = Number.isFinite(estimatedSeconds) && estimatedSeconds > 0;
+      const shouldUseRemaining = Number.isFinite(queueRemaining) && queueRemaining >= 0
+        && (index === 0 || !hasEstimated || queueRemaining <= estimatedSeconds);
+      const durationSeconds = shouldUseRemaining
+        ? queueRemaining
+        : (hasEstimated ? estimatedSeconds : 0);
+
+      advanceResources(resources, productionPerSecond, durationSeconds, storageCapacity);
+      elapsedSeconds += durationSeconds;
+
+      simLevels[key] = nextLevel;
+      if (key === "dock") {
+        simLevels.docks = nextLevel;
+      } else if (key === "docks") {
+        simLevels.dock = nextLevel;
+      }
+
+      if (key === "storage") {
+        const nextCapacity = estimateStorageCapacityFromLevel(nextLevel, storageCache);
+        if (nextCapacity && Number.isFinite(nextCapacity) && nextCapacity > 0) {
+          storageCapacity = nextCapacity;
+        }
+      }
+
+      const producedResource = RESOURCE_BUILDING_TO_RESOURCE[key];
+      if (producedResource) {
+        productionPerSecond[producedResource] = estimateResourceRateForLevel(
+          producedResource,
+          nextLevel,
+          worldSpeed,
+          productionMultipliers[producedResource]
+        );
+      }
+    });
+
+    if (Number.isFinite(storageCapacity) && storageCapacity > 0) {
+      RESOURCE_KEYS.forEach((resourceKey) => {
+        resources[resourceKey] = Math.min(storageCapacity, Math.max(0, resources[resourceKey] || 0));
+      });
+    }
+
+    return {
+      levels: projectedLevels,
+      economy: {
+        resources,
+        productionPerSecond,
+        storageCapacity: Number.isFinite(storageCapacity) && storageCapacity > 0 ? storageCapacity : null,
+        worldSpeed
+      },
+      queueDurationSeconds: elapsedSeconds
+    });
   }
 
   function collectNumericEntries(out, source) {
@@ -2159,6 +2307,8 @@
     }
     panel.setAttribute("data-layout-ready", "1");
     applyPanelLayout(panel, getPanelLayout());
+    constrainPanelToViewport(panel);
+    persistPanelLayout(panel);
 
     const header = panel.querySelector(".tm-header");
     let dragging = false;
@@ -2326,17 +2476,19 @@
           <div class="tm-special-building"></div>
           <div class="tm-plan-preview"></div>
           <div class="tm-body">
-            <table class="tm-plan-table">
-              <thead>
-                <tr>
-                  <th class="tm-col-prio">Prio</th>
-                  <th class="tm-col-building">Batiment</th>
-                  <th class="tm-col-state">Etat</th>
-                  <th class="tm-col-target">Cible</th>
-                </tr>
-              </thead>
-              <tbody class="tm-rows"></tbody>
-            </table>
+            <div class="tm-table-scroll">
+              <table class="tm-plan-table">
+                <thead>
+                  <tr>
+                    <th class="tm-col-prio">Prio</th>
+                    <th class="tm-col-building">Batiment</th>
+                    <th class="tm-col-state">Etat</th>
+                    <th class="tm-col-target">Cible</th>
+                  </tr>
+                </thead>
+                <tbody class="tm-rows"></tbody>
+              </table>
+            </div>
             <p class="tm-hint">MAJ auto. Ordre simule avec couts/temps/ressources. Passe en "Personnalise" pour modifier tes objectifs.</p>
           </div>
         </div>
@@ -2347,6 +2499,10 @@
 
     const worldSelect = panel.querySelector(".tm-world-select");
     const select = panel.querySelector(".tm-preset-select");
+    if (!worldSelect || !select) {
+      attachPanelInteractions(panel);
+      return panel;
+    }
     Object.entries(WORLD_MODES).forEach(([key, value]) => {
       const option = document.createElement("option");
       option.value = key;
@@ -2357,7 +2513,7 @@
     worldSelect.addEventListener("change", () => {
       setSelectedWorldMode(worldSelect.value);
       populatePresetSelect(select);
-      render(true);
+      safeRender(true);
     });
 
     populatePresetSelect(select);
@@ -2366,48 +2522,57 @@
       if (select.value !== CUSTOM_PRESET_ID) {
         isCustomEditMode = false;
       }
-      render(true);
+      safeRender(true);
     });
 
     const collapseBtn = panel.querySelector(".tm-minimize-btn");
-    collapseBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      const collapsed = panel.classList.toggle("tm-collapsed");
-      collapseBtn.classList.toggle("minimize", !collapsed);
-      collapseBtn.classList.toggle("maximize", collapsed);
-      collapseBtn.setAttribute("aria-label", collapsed ? "Agrandir" : "Reduire");
-    });
+    if (collapseBtn) {
+      collapseBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        const collapsed = panel.classList.toggle("tm-collapsed");
+        collapseBtn.classList.toggle("minimize", !collapsed);
+        collapseBtn.classList.toggle("maximize", collapsed);
+        collapseBtn.setAttribute("aria-label", collapsed ? "Agrandir" : "Reduire");
+      });
+    }
     const closeBtn = panel.querySelector(".tm-close-btn");
-    closeBtn.addEventListener("click", (event) => {
-      event.preventDefault();
-      if (refreshTimer) {
-        clearInterval(refreshTimer);
-        refreshTimer = null;
-      }
-      panel.remove();
-    });
+    if (closeBtn) {
+      closeBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        if (refreshTimer) {
+          clearInterval(refreshTimer);
+          refreshTimer = null;
+        }
+        panel.remove();
+      });
+    }
 
     const cloneBtn = panel.querySelector(".tm-clone-btn");
-    cloneBtn.addEventListener("click", () => {
-      const currentConfig = getPresetConfig(getSelectedPreset());
-      saveCustomTargets(cloneTargets(currentConfig.targets));
-      setSelectedPreset(CUSTOM_PRESET_ID);
-      select.value = CUSTOM_PRESET_ID;
-      isCustomEditMode = true;
-      render(true);
-    });
+    if (cloneBtn) {
+      cloneBtn.addEventListener("click", () => {
+        const currentConfig = getPresetConfig(getSelectedPreset());
+        saveCustomTargets(cloneTargets(currentConfig.targets));
+        setSelectedPreset(CUSTOM_PRESET_ID);
+        select.value = CUSTOM_PRESET_ID;
+        isCustomEditMode = true;
+        safeRender(true);
+      });
+    }
 
     const editBtn = panel.querySelector(".tm-edit-btn");
-    editBtn.addEventListener("click", () => {
-      if (getSelectedPreset() !== CUSTOM_PRESET_ID) {
-        return;
-      }
-      isCustomEditMode = !isCustomEditMode;
-      render(true);
-    });
+    if (editBtn) {
+      editBtn.addEventListener("click", () => {
+        if (getSelectedPreset() !== CUSTOM_PRESET_ID) {
+          return;
+        }
+        isCustomEditMode = !isCustomEditMode;
+        safeRender(true);
+      });
+    }
 
     const applyBtn = panel.querySelector(".tm-apply-btn");
-    applyBtn.addEventListener("click", () => {
+    if (applyBtn) {
+      applyBtn.addEventListener("click", () => {
       const wrappers = Array.from(panel.querySelectorAll(".tm-target-inputs[data-building-key]"));
       if (!wrappers.length) {
         return;
@@ -2455,25 +2620,30 @@
 
       saveCustomTargets(nextTargets);
       isCustomEditMode = false;
-      render(true);
-    });
+        safeRender(true);
+      });
+    }
 
     const resetBtn = panel.querySelector(".tm-reset-btn");
-    resetBtn.addEventListener("click", () => {
-      saveCustomTargets(getDefaultCustomTargets());
-      isCustomEditMode = false;
-      if (select.value !== CUSTOM_PRESET_ID) {
-        setSelectedPreset(CUSTOM_PRESET_ID);
-        select.value = CUSTOM_PRESET_ID;
-      }
-      render(true);
-    });
+    if (resetBtn) {
+      resetBtn.addEventListener("click", () => {
+        saveCustomTargets(getDefaultCustomTargets());
+        isCustomEditMode = false;
+        if (select.value !== CUSTOM_PRESET_ID) {
+          setSelectedPreset(CUSTOM_PRESET_ID);
+          select.value = CUSTOM_PRESET_ID;
+        }
+        safeRender(true);
+      });
+    }
 
     const layoutResetBtn = panel.querySelector(".tm-layout-reset-btn");
-    layoutResetBtn.addEventListener("click", () => {
-      resetPanelLayout(panel);
-      render(true);
-    });
+    if (layoutResetBtn) {
+      layoutResetBtn.addEventListener("click", () => {
+        resetPanelLayout(panel);
+        safeRender(true);
+      });
+    }
 
     attachPanelInteractions(panel);
 
@@ -2612,12 +2782,41 @@
 
       #${PANEL_ID} .tm-controls select {
         width: 100%;
-        height: 24px;
-        border: 1px solid #8a622d;
-        background: linear-gradient(180deg, #f4e6c4 0%, #decb9e 100%);
+        height: 25px;
+        border: 1px solid #7d5a2b;
+        border-radius: 0;
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        background-image:
+          linear-gradient(180deg, rgba(248, 232, 196, 0.98) 0%, rgba(220, 192, 142, 0.98) 100%),
+          url("${ASSETS.ui.panelOverlay}"),
+          linear-gradient(45deg, transparent 50%, #5a3b15 50%),
+          linear-gradient(135deg, #5a3b15 50%, transparent 50%);
+        background-repeat: repeat, repeat, no-repeat, no-repeat;
+        background-size: auto, auto, 6px 6px, 6px 6px;
+        background-position: 0 0, 0 0, calc(100% - 14px) 9px, calc(100% - 9px) 9px;
         color: #2f210d;
-        padding: 2px 6px;
+        padding: 2px 24px 2px 7px;
         font: inherit;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 248, 227, 0.72),
+          inset 0 -1px 0 rgba(96, 64, 26, 0.36),
+          0 1px 0 rgba(0, 0, 0, 0.12);
+      }
+
+      #${PANEL_ID} .tm-controls select:hover {
+        filter: brightness(1.04);
+      }
+
+      #${PANEL_ID} .tm-controls select:focus {
+        outline: 1px solid rgba(122, 87, 43, 0.55);
+        outline-offset: 0;
+      }
+
+      #${PANEL_ID} .tm-controls select option {
+        background: #e4cfa6;
+        color: #2f210d;
       }
 
       #${PANEL_ID} .tm-actions {
@@ -2672,41 +2871,102 @@
         display: none;
       }
 
-      #${PANEL_ID} table {
-        width: calc(100% - 16px);
-        margin: 8px 8px 0;
-        border-collapse: collapse;
-        table-layout: fixed;
+      #${PANEL_ID} .tm-body {
+        padding-bottom: 6px;
       }
 
-      #${PANEL_ID} th,
-      #${PANEL_ID} td {
-        border: 1px solid rgba(126, 86, 40, 0.5);
-        padding: 5px 6px;
+      #${PANEL_ID} .tm-table-scroll {
+        margin: 8px 8px 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+
+      #${PANEL_ID} .tm-plan-table {
+        width: 100%;
+        min-width: 690px;
+        border-collapse: collapse;
+        table-layout: fixed;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 240, 202, 0.28),
+          0 0 0 1px rgba(82, 53, 22, 0.42);
+      }
+
+      #${PANEL_ID} .tm-plan-table .tm-col-prio {
+        width: 76px;
+        min-width: 76px;
+        text-align: center;
+        white-space: nowrap;
+      }
+
+      #${PANEL_ID} .tm-plan-table .tm-col-building {
+        width: 188px;
+        min-width: 188px;
+      }
+
+      #${PANEL_ID} .tm-plan-table .tm-col-state {
+        width: 210px;
+        min-width: 210px;
+      }
+
+      #${PANEL_ID} .tm-plan-table .tm-col-target {
+        width: 216px;
+        min-width: 216px;
+      }
+
+      #${PANEL_ID} .tm-plan-table th,
+      #${PANEL_ID} .tm-plan-table td {
+        box-sizing: border-box;
+        border: 1px solid rgba(116, 79, 35, 0.62);
+        padding: 5px 7px;
         text-align: left;
         vertical-align: top;
       }
 
-      #${PANEL_ID} th {
+      #${PANEL_ID} .tm-plan-table th {
         background-image:
-          linear-gradient(180deg, rgba(137, 94, 39, 0.95) 0%, rgba(93, 63, 27, 0.95) 100%),
+          linear-gradient(180deg, rgba(153, 107, 49, 0.97) 0%, rgba(96, 65, 29, 0.97) 100%),
           url("${ASSETS.ui.panelOverlay}");
         background-repeat: repeat;
-        color: #ffe7bb;
+        color: #ffe4b2;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.58);
+        box-shadow:
+          inset 0 1px 0 rgba(245, 208, 140, 0.32),
+          inset 0 -1px 0 rgba(38, 24, 11, 0.48);
       }
 
-      #${PANEL_ID} td {
-        background-color: rgba(38, 24, 11, 0.08);
+      #${PANEL_ID} .tm-plan-table td {
+        background: linear-gradient(180deg, rgba(246, 232, 199, 0.23) 0%, rgba(196, 167, 120, 0.21) 100%);
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
 
-      #${PANEL_ID} tbody tr:nth-child(even) td {
-        background-color: rgba(38, 24, 11, 0.14);
+      #${PANEL_ID} .tm-plan-table tbody tr:nth-child(even) td {
+        background: linear-gradient(180deg, rgba(233, 213, 176, 0.26) 0%, rgba(182, 150, 104, 0.24) 100%);
+      }
+
+      #${PANEL_ID} .tm-plan-table tbody tr:hover td {
+        background-color: rgba(166, 124, 66, 0.22);
+      }
+
+      #${PANEL_ID} .tm-plan-table td:nth-child(1) {
+        text-align: center;
+        white-space: nowrap;
+      }
+
+      #${PANEL_ID} .tm-plan-table td:nth-child(3),
+      #${PANEL_ID} .tm-plan-table td:nth-child(4) {
+        white-space: normal;
       }
 
       #${PANEL_ID} .tm-building-cell {
         display: flex;
         align-items: center;
         gap: 6px;
+      }
+
+      #${PANEL_ID} .tm-building-cell span {
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       #${PANEL_ID} .tm-prio-cell {
@@ -2734,6 +2994,19 @@
         color: #2f210d;
         font: inherit;
         padding: 2px 3px;
+      }
+
+      #${PANEL_ID} .tm-table-scroll::-webkit-scrollbar {
+        height: 9px;
+      }
+
+      #${PANEL_ID} .tm-table-scroll::-webkit-scrollbar-track {
+        background: rgba(83, 57, 26, 0.35);
+      }
+
+      #${PANEL_ID} .tm-table-scroll::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, #c39b61 0%, #8a6636 100%);
+        border: 1px solid rgba(64, 43, 19, 0.7);
       }
 
       #${PANEL_ID} .tm-ok { color: #9be28f; }
@@ -2784,6 +3057,44 @@
 
   let lastSignature = "";
 
+  function safeRender(force) {
+    try {
+      render(force);
+      return;
+    } catch (error) {
+      try {
+        console.error("[tm-grepolis-opt] render failed", error);
+      } catch (_) {}
+
+      const panel = document.getElementById(PANEL_ID) || buildPanel();
+      if (!panel) {
+        return;
+      }
+
+      panel.classList.remove("tm-collapsed");
+      panel.style.display = "block";
+      constrainPanelToViewport(panel);
+
+      const rowsEl = panel.querySelector(".tm-rows");
+      const nextActionEl = panel.querySelector(".tm-next-action");
+      const specialEl = panel.querySelector(".tm-special-building");
+      const planPreviewEl = panel.querySelector(".tm-plan-preview");
+
+      if (rowsEl) {
+        rowsEl.innerHTML = `<tr><td colspan="4" class="tm-low">Erreur de rendu detectee. Recharge la page pour reinitialiser l'affichage.</td></tr>`;
+      }
+      if (nextActionEl) {
+        nextActionEl.textContent = "Le panneau est visible mais le rendu a echoue temporairement.";
+      }
+      if (specialEl) {
+        specialEl.textContent = "Batiment special: indisponible (fallback).";
+      }
+      if (planPreviewEl) {
+        planPreviewEl.textContent = "Fallback actif.";
+      }
+    }
+  }
+
   function render(force) {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) {
@@ -2795,8 +3106,11 @@
     const town = getTown();
     const levels = extractBuildingLevels(town);
     const buildingOrders = getTownBuildingOrders(town, levels);
-    const projectedLevels = applyBuildingOrdersToLevels(levels, buildingOrders);
     const economy = extractTownEconomy(town, levels);
+    const projectedState = projectTownStateAfterOrders(levels, economy, buildingOrders);
+    const projectedLevels = projectedState.levels || applyBuildingOrdersToLevels(levels, buildingOrders);
+    const projectedEconomy = projectedState.economy || economy;
+    const queueDurationSeconds = Math.max(0, Number(projectedState.queueDurationSeconds) || 0);
     const rowsEl = panel.querySelector(".tm-rows");
     const townNameEl = panel.querySelector(".tm-town-name");
     const nextActionEl = panel.querySelector(".tm-next-action");
@@ -2845,14 +3159,15 @@
       values: Object.keys(preset.targets).map((key) => getLevelForBuilding(projectedLevels, key)),
       targets: preset.targets,
       queue: buildingOrders.map((order) => [order.key, order.targetLevel, Math.round(order.remainingSeconds || -1)]),
-      resources: economy
+      queueDuration: Math.round(queueDurationSeconds),
+      resources: projectedEconomy
         ? [
-            Math.floor(economy.resources.wood || 0),
-            Math.floor(economy.resources.stone || 0),
-            Math.floor(economy.resources.iron || 0),
-            Math.round((economy.productionPerSecond.wood || 0) * 1000) / 1000,
-            Math.round((economy.productionPerSecond.stone || 0) * 1000) / 1000,
-            Math.round((economy.productionPerSecond.iron || 0) * 1000) / 1000
+            Math.floor(projectedEconomy.resources.wood || 0),
+            Math.floor(projectedEconomy.resources.stone || 0),
+            Math.floor(projectedEconomy.resources.iron || 0),
+            Math.round((projectedEconomy.productionPerSecond.wood || 0) * 1000) / 1000,
+            Math.round((projectedEconomy.productionPerSecond.stone || 0) * 1000) / 1000,
+            Math.round((projectedEconomy.productionPerSecond.iron || 0) * 1000) / 1000
           ]
         : null
     });
@@ -2865,7 +3180,7 @@
     townNameEl.textContent = townName;
     rowsEl.innerHTML = "";
 
-    const plan = getPriorityPlan(preset, projectedLevels, economy);
+    const plan = getPriorityPlan(preset, projectedLevels, projectedEconomy);
     const hasSimulation = plan.some((item) => item && item.simulated);
     const priorityByKey = new Map();
     plan.forEach((item, index) => {
@@ -2882,6 +3197,9 @@
     const first = plan.length ? plan[0] : null;
     const topPlan = plan.slice(0, 10);
     const currentOrder = buildingOrders.length ? buildingOrders[0] : null;
+    const queueContext = buildingOrders.length > 1
+      ? ` File: ${buildingOrders.length} ordres (${formatDuration(queueDurationSeconds)}).`
+      : "";
     if (currentOrder) {
       const currentName = BUILDING_LABELS[currentOrder.key] || currentOrder.key;
       const currentFrom = Math.max(0, currentOrder.targetLevel - 1);
@@ -2891,9 +3209,9 @@
       if (first) {
         const firstName = BUILDING_LABELS[first.key] || first.key;
         const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}. Prochain: ${firstName} -> niv ${firstTarget}.`;
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}.${queueContext} Apres file: ${firstName} -> niv ${firstTarget}.`;
       } else {
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}. Ensuite: template atteint.`;
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}.${queueContext} Ensuite: template atteint.`;
       }
     } else if (first) {
       const firstName = BUILDING_LABELS[first.key] || first.key;
@@ -2911,7 +3229,7 @@
     }
 
     planPreviewEl.textContent = topPlan.length
-      ? `Top ${topPlan.length} prochaines constructions optimisees.`
+      ? `Top ${topPlan.length} prochaines constructions optimisees${queueDurationSeconds > 0 ? ` (file: ${formatDuration(queueDurationSeconds)})` : ""}.`
       : "Aucune construction restante pour ce preset.";
 
     const special = preset.specialBuilding || inferSpecialBuilding(preset.targets);
@@ -3025,7 +3343,7 @@
     if (colTargetEl) colTargetEl.textContent = "Cible";
 
     targetEntries.forEach(([buildingKey, range]) => {
-      const level = getLevelForBuilding(levels, buildingKey);
+      const level = getLevelForBuilding(projectedLevels, buildingKey);
       const status = evaluateLevel(level, range);
       const row = document.createElement("tr");
 
@@ -3102,9 +3420,9 @@
     }
     injectStyles();
     buildPanel();
-    render(true);
+    safeRender(true);
     if (!refreshTimer) {
-      refreshTimer = setInterval(() => render(false), 1500);
+      refreshTimer = setInterval(() => safeRender(false), 1500);
     }
   }
 
