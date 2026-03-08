@@ -2007,7 +2007,7 @@
         worldSpeed
       },
       queueDurationSeconds: elapsedSeconds
-    });
+    };
   }
 
   function collectNumericEntries(out, source) {
