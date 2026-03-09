@@ -15,12 +15,29 @@
 
   const uw = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   const STORAGE_KEY = "tm_grepolis_preset_v1";
+  const PRESET_BY_TOWN_KEY_PREFIX = "tm_grepolis_preset_by_town_v1";
   const WORLD_MODE_KEY = "tm_grepolis_world_mode_v1";
   const CUSTOM_TARGETS_KEY_PREFIX = "tm_grepolis_custom_targets_v2";
   const LEGACY_CUSTOM_TARGETS_KEY = "tm_grepolis_custom_targets_v1";
   const PANEL_LAYOUT_KEY = "tm_grepolis_panel_layout_v1";
   const PANEL_ID = "tm-grepolis-opt-panel";
   const CUSTOM_PRESET_ID = "custom";
+  const DIO_TOWN_ICON_CODE_BY_PRESET = Object.freeze({
+    def_navale: "sd",
+    off_navale: "so",
+    def_terre: "ld",
+    off_terre: "lo",
+    def_myth: "fd",
+    off_myth: "fo"
+  });
+  const DIO_TOWN_ICON_INDEX_BY_CODE = Object.freeze({
+    lo: 0,
+    ld: 3,
+    so: 6,
+    sd: 7,
+    fd: 9,
+    fo: 10
+  });
   function detectCdnBase() {
     const parseOrigin = (value) => {
       if (!value || typeof value !== "string") {
@@ -96,11 +113,14 @@
     }
   });
   const SPECIAL_BUILDING_KEYS = new Set(["lighthouse", "tower", "thermal", "library", "theater", "trade_office"]);
+  const MIN_PANEL_WIDTH = 500;
+  const COMPACT_TABLE_ROW_COUNT = 4;
+  const TIMING_COLUMN_TOOLTIP = "Attente: delai avant lancement depuis maintenant (inclut file + etapes precedentes + attente ressources) | Construction: duree du chantier | Fin estimee: heure relative de fin depuis maintenant";
   const DEFAULT_PANEL_LAYOUT = Object.freeze({
     top: 86,
     right: 12,
     left: null,
-    width: 420,
+    width: MIN_PANEL_WIDTH,
     height: 0
   });
   const WORLD_MODES = Object.freeze({
@@ -404,7 +424,10 @@
   };
 
   let isCustomEditMode = false;
+  let isQueueDetailsVisible = false;
+  let isFullTableVisible = false;
   let refreshTimer = null;
+  let lastPresetSyncScope = "";
   const levelCacheByTown = new Map();
 
   function toInt(value, fallback) {
@@ -657,7 +680,136 @@
     };
   }
 
-  function getSimplePriorityPlan(preset, levels) {
+  function estimateSimplePlanTimings(tasks, levels, economy) {
+    if (!Array.isArray(tasks) || !tasks.length || !levels || !economy) {
+      return tasks;
+    }
+
+    const worldSpeed = economy.worldSpeed > 0 ? economy.worldSpeed : getWorldSpeedFactor();
+    const storageCache = new Map();
+    const costCache = new Map();
+    const timeCache = new Map();
+    const state = {
+      levels: { ...levels },
+      resources: {
+        wood: Math.max(0, economy.resources.wood || 0),
+        stone: Math.max(0, economy.resources.stone || 0),
+        iron: Math.max(0, economy.resources.iron || 0)
+      },
+      productionPerSecond: {
+        wood: Math.max(0, economy.productionPerSecond.wood || 0),
+        stone: Math.max(0, economy.productionPerSecond.stone || 0),
+        iron: Math.max(0, economy.productionPerSecond.iron || 0)
+      },
+      storageCapacity: Number.isFinite(economy.storageCapacity) && economy.storageCapacity > 0
+        ? economy.storageCapacity
+        : Number.POSITIVE_INFINITY,
+      elapsedSeconds: 0
+    };
+
+    if (typeof state.levels.dock === "number" && typeof state.levels.docks !== "number") {
+      state.levels.docks = state.levels.dock;
+    }
+    if (typeof state.levels.docks === "number" && typeof state.levels.dock !== "number") {
+      state.levels.dock = state.levels.docks;
+    }
+
+    const productionMultipliers = { wood: 1, stone: 1, iron: 1 };
+    RESOURCE_BUILDING_KEYS.forEach((buildingKey) => {
+      const resourceKey = RESOURCE_BUILDING_TO_RESOURCE[buildingKey];
+      const level = getLevelForBuilding(state.levels, buildingKey);
+      const observedPerHour = Math.max(0, (state.productionPerSecond[resourceKey] || 0) * 3600);
+      const neutralPerHour = Math.max(1, getNeutralResourceOutputPerHour(level) * worldSpeed);
+      if (observedPerHour > 0) {
+        productionMultipliers[resourceKey] = Math.min(2.5, Math.max(0.25, observedPerHour / neutralPerHour));
+      }
+      if (state.productionPerSecond[resourceKey] <= 0) {
+        state.productionPerSecond[resourceKey] = estimateResourceRateForLevel(
+          resourceKey,
+          level,
+          worldSpeed,
+          productionMultipliers[resourceKey]
+        );
+      }
+    });
+
+    tasks.forEach((task) => {
+      if (!task || !task.key) {
+        return;
+      }
+      const action = task.action === "downgrade" ? "downgrade" : "upgrade";
+      const currentLevel = Math.max(0, getLevelForBuilding(state.levels, task.key));
+      const nextLevel = action === "downgrade"
+        ? Math.max(0, currentLevel - 1)
+        : currentLevel + 1;
+
+      task.level = currentLevel;
+
+      if (action === "downgrade") {
+        task.waitSeconds = 0;
+        task.buildSeconds = 0;
+        task.finishSeconds = state.elapsedSeconds;
+      } else {
+        const senateLevel = getLevelForBuilding(state.levels, "main");
+        const cost = estimateUpgradeCost(task.key, nextLevel, costCache);
+        const buildSeconds = estimateUpgradeBuildSeconds(task.key, nextLevel, senateLevel, worldSpeed, timeCache);
+
+        if (!cost || !buildSeconds || !Number.isFinite(buildSeconds)) {
+          task.waitSeconds = Number.POSITIVE_INFINITY;
+          task.buildSeconds = 0;
+          task.finishSeconds = Number.POSITIVE_INFINITY;
+          return;
+        }
+
+        const waitSeconds = estimateWaitSeconds(cost, state.resources, state.productionPerSecond, state.storageCapacity);
+        if (!Number.isFinite(waitSeconds)) {
+          task.waitSeconds = Number.POSITIVE_INFINITY;
+          task.buildSeconds = buildSeconds;
+          task.finishSeconds = Number.POSITIVE_INFINITY;
+          return;
+        }
+
+        const duration = waitSeconds + buildSeconds;
+        advanceResources(state.resources, state.productionPerSecond, duration, state.storageCapacity);
+        RESOURCE_KEYS.forEach((resourceKey) => {
+          state.resources[resourceKey] = Math.max(0, (state.resources[resourceKey] || 0) - (cost[resourceKey] || 0));
+        });
+        state.elapsedSeconds += duration;
+
+        task.waitSeconds = waitSeconds;
+        task.buildSeconds = buildSeconds;
+        task.finishSeconds = state.elapsedSeconds;
+      }
+
+      state.levels[task.key] = nextLevel;
+      if (task.key === "dock") {
+        state.levels.docks = nextLevel;
+      } else if (task.key === "docks") {
+        state.levels.dock = nextLevel;
+      }
+
+      if (task.key === "storage") {
+        const updatedCapacity = estimateStorageCapacityFromLevel(nextLevel, storageCache);
+        if (updatedCapacity && Number.isFinite(updatedCapacity) && updatedCapacity > 0) {
+          state.storageCapacity = updatedCapacity;
+        }
+      }
+
+      const producedResource = RESOURCE_BUILDING_TO_RESOURCE[task.key];
+      if (producedResource) {
+        state.productionPerSecond[producedResource] = estimateResourceRateForLevel(
+          producedResource,
+          nextLevel,
+          worldSpeed,
+          productionMultipliers[producedResource]
+        );
+      }
+    });
+
+    return tasks;
+  }
+
+  function getSimplePriorityPlan(preset, levels, economy) {
     const order = Array.isArray(preset.priorityOrder) ? preset.priorityOrder : Object.keys(preset.targets);
     const orderIndex = new Map(order.map((key, index) => [key, index]));
     const tasks = [];
@@ -673,6 +825,7 @@
         tasks.push({
           key,
           kind: "required",
+          action: "upgrade",
           level,
           min,
           max,
@@ -688,6 +841,7 @@
         tasks.push({
           key,
           kind: "optional",
+          action: "upgrade",
           level,
           min,
           max,
@@ -699,14 +853,47 @@
           finishSeconds: 0,
           simulated: false
         });
+      } else if (level > max && canDowngradeBuilding(key, level, levels)) {
+        tasks.push({
+          key,
+          kind: "required_downgrade",
+          action: "downgrade",
+          level,
+          min,
+          max,
+          gap: level - max,
+          targetLevel: max,
+          order: orderIndex.has(key) ? orderIndex.get(key) : 9999,
+          waitSeconds: 0,
+          buildSeconds: 0,
+          finishSeconds: 0,
+          simulated: false
+        });
       }
     });
 
     tasks.sort((a, b) => {
-      const groupA = a.kind === "required" ? 0 : 1;
-      const groupB = b.kind === "required" ? 0 : 1;
+      const getGroup = (kind) => {
+        if (kind === "required_downgrade") {
+          return 0;
+        }
+        if (kind === "required") {
+          return 1;
+        }
+        return 2;
+      };
+      const groupA = getGroup(a.kind);
+      const groupB = getGroup(b.kind);
       if (groupA !== groupB) {
         return groupA - groupB;
+      }
+      if (groupA === 0) {
+        if (b.gap !== a.gap) {
+          return b.gap - a.gap;
+        }
+        if (a.order !== b.order) {
+          return b.order - a.order;
+        }
       }
       if (a.order !== b.order) {
         return a.order - b.order;
@@ -719,7 +906,7 @@
       return labelA.localeCompare(labelB, "fr");
     });
 
-    return tasks;
+    return estimateSimplePlanTimings(tasks, levels, economy);
   }
 
   function readLooseNumber(value) {
@@ -845,6 +1032,37 @@
     return null;
   }
 
+  function readLevelScopedNumber(source, level) {
+    if (source === null || source === undefined) {
+      return null;
+    }
+
+    if (typeof source === "number" || typeof source === "string") {
+      return readLooseNumber(source);
+    }
+
+    if (Array.isArray(source)) {
+      const byLevel = pickFirstFiniteNumber(
+        source[level],
+        source[level - 1],
+        source[Math.max(0, level - 1)]
+      );
+      return byLevel !== null ? byLevel : null;
+    }
+
+    if (typeof source === "object") {
+      return pickFirstFiniteNumber(
+        source[level],
+        source[String(level)],
+        source.value,
+        source.points,
+        source.score
+      );
+    }
+
+    return null;
+  }
+
   function readResourcePayload(raw) {
     if (!raw || typeof raw !== "object") {
       return null;
@@ -891,18 +1109,36 @@
       }
 
       if (!result) {
+        if (typeof entry.resourcesFor === "function") {
+          try {
+            result = readResourcePayload(entry.resourcesFor(targetLevel));
+          } catch (_) {}
+        }
+      }
+
+      if (!result) {
         const baseResources = readResourcePayload(entry.resources || entry.costs || entry.cost || entry.build_resources);
-        const resourcesFactor = pickFirstFiniteNumber(
+        const sharedFactor = pickFirstFiniteNumber(
           entry.resources_factor,
           entry.resource_factor,
           entry.cost_factor,
           entry.build_resources_factor
         );
-        if (baseResources && resourcesFactor !== null && resourcesFactor > 0) {
+        const woodFactor = pickFirstFiniteNumber(entry.wood_factor, sharedFactor);
+        const stoneFactor = pickFirstFiniteNumber(entry.stone_factor, sharedFactor);
+        const ironFactor = pickFirstFiniteNumber(entry.iron_factor, sharedFactor);
+        if (baseResources) {
+          const computeResource = (baseValue, factor) => {
+            const safeBase = Math.max(0, Number(baseValue) || 0);
+            if (!Number.isFinite(factor) || factor <= 0) {
+              return Math.round(safeBase);
+            }
+            return Math.max(0, Math.round(safeBase * Math.pow(targetLevel, factor)));
+          };
           result = {
-            wood: Math.max(0, Math.round(baseResources.wood * Math.pow(targetLevel, resourcesFactor))),
-            stone: Math.max(0, Math.round(baseResources.stone * Math.pow(targetLevel, resourcesFactor))),
-            iron: Math.max(0, Math.round(baseResources.iron * Math.pow(targetLevel, resourcesFactor))),
+            wood: computeResource(baseResources.wood, woodFactor),
+            stone: computeResource(baseResources.stone, stoneFactor),
+            iron: computeResource(baseResources.iron, ironFactor),
             population: 0,
             favor: 0
           };
@@ -930,6 +1166,52 @@
       cache.set(cacheKey, result);
     }
     return result;
+  }
+
+  function estimateUpgradePoints(buildingKey, targetLevel, pointsCache, costCache) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const safeLevel = Math.max(1, toInt(targetLevel, 1));
+    const cacheKey = `${canonical}:${safeLevel}`;
+    if (pointsCache && pointsCache.has(cacheKey)) {
+      return pointsCache.get(cacheKey);
+    }
+
+    const entry = getBuildingDataEntry(canonical);
+    const levelConfig = entry ? getLevelConfigFromData(entry, safeLevel) : null;
+    let points = pickFirstFiniteNumber(
+      levelConfig && levelConfig.points,
+      levelConfig && levelConfig.score,
+      levelConfig && levelConfig.building_points,
+      levelConfig && levelConfig.gain_points,
+      levelConfig && levelConfig.points_gain
+    );
+
+    if (points === null && entry) {
+      points = pickFirstFiniteNumber(
+        readLevelScopedNumber(entry.points, safeLevel),
+        readLevelScopedNumber(entry.score, safeLevel),
+        readLevelScopedNumber(entry.building_points, safeLevel)
+      );
+    }
+
+    if (points === null) {
+      const estimatedCost = estimateUpgradeCost(canonical, safeLevel, costCache || new Map());
+      if (estimatedCost) {
+        const totalResources = Math.max(0, estimatedCost.wood || 0) + Math.max(0, estimatedCost.stone || 0) + Math.max(0, estimatedCost.iron || 0);
+        if (totalResources > 0) {
+          points = totalResources / 60;
+        }
+      }
+    }
+
+    const normalized = points !== null && Number.isFinite(points) && points > 0
+      ? Math.max(1, Math.round(points))
+      : null;
+
+    if (pointsCache) {
+      pointsCache.set(cacheKey, normalized);
+    }
+    return normalized;
   }
 
   function getWorldSpeedFactor() {
@@ -1076,6 +1358,36 @@
     return true;
   }
 
+  function canDowngradeBuilding(buildingKey, currentLevel, levels) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const safeCurrent = Math.max(0, toInt(currentLevel, 0));
+    if (!levels || safeCurrent <= 0) {
+      return false;
+    }
+
+    const simulated = { ...(levels || {}) };
+    const nextLevel = safeCurrent - 1;
+    simulated[canonical] = nextLevel;
+    if (canonical === "dock") {
+      simulated.docks = nextLevel;
+    } else if (canonical === "docks") {
+      simulated.dock = nextLevel;
+    }
+
+    const checks = new Set([...KNOWN_BUILDING_KEYS, canonical]);
+    for (const key of checks) {
+      const level = getLevelForBuilding(simulated, key);
+      if (level <= 0) {
+        continue;
+      }
+      if (!areDependenciesMet(key, level, simulated)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   function estimateStorageCapacityFromLevel(level, cache) {
     const safeLevel = Math.max(1, toInt(level, 1));
     const cacheKey = `storage:${safeLevel}`;
@@ -1203,23 +1515,26 @@
   }
 
   function getPriorityPlan(preset, levels, economy) {
-    const fallbackPlan = getSimplePriorityPlan(preset, levels);
+    const fallbackPlan = getSimplePriorityPlan(preset, levels, economy);
     if (!preset || !levels || !economy) {
       return fallbackPlan;
     }
 
     const order = Array.isArray(preset.priorityOrder) ? preset.priorityOrder : Object.keys(preset.targets);
     const orderIndex = new Map(order.map((key, index) => [key, index]));
+    const targetRangesByKey = {};
     const targetMaxByKey = {};
     Object.entries(preset.targets).forEach(([buildingKey, range]) => {
       const normalized = normalizeRange(range);
       if (!normalized) {
         return;
       }
-      targetMaxByKey[normalizeBuildingKey(buildingKey)] = normalized[1];
+      const canonical = normalizeBuildingKey(buildingKey);
+      targetRangesByKey[canonical] = normalized;
+      targetMaxByKey[canonical] = normalized[1];
     });
 
-    if (!Object.keys(targetMaxByKey).length) {
+    if (!Object.keys(targetRangesByKey).length) {
       return [];
     }
 
@@ -1276,9 +1591,10 @@
     const maxIterations = 600;
 
     for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-      const pendingKeys = Object.keys(targetMaxByKey).filter((buildingKey) => {
+      const pendingKeys = Object.keys(targetRangesByKey).filter((buildingKey) => {
         const currentLevel = getLevelForBuilding(state.levels, buildingKey);
-        return currentLevel < targetMaxByKey[buildingKey];
+        const range = targetRangesByKey[buildingKey] || [0, 0];
+        return currentLevel < range[0] || currentLevel > range[1] || currentLevel < range[1];
       });
 
       if (!pendingKeys.length) {
@@ -1292,6 +1608,36 @@
 
       pendingKeys.forEach((buildingKey) => {
         const currentLevel = getLevelForBuilding(state.levels, buildingKey);
+        const normalizedRange = targetRangesByKey[buildingKey] || [0, 0];
+        const minTarget = normalizedRange[0];
+        const maxTarget = normalizedRange[1];
+
+        if (currentLevel > maxTarget) {
+          if (!canDowngradeBuilding(buildingKey, currentLevel, state.levels)) {
+            return;
+          }
+          candidates.push({
+            key: buildingKey,
+            level: currentLevel,
+            nextLevel: Math.max(0, currentLevel - 1),
+            kind: "required_downgrade",
+            action: "downgrade",
+            min: minTarget,
+            max: maxTarget,
+            cost: null,
+            waitSeconds: 0,
+            buildSeconds: 0,
+            score: 0,
+            order: orderIndex.has(buildingKey) ? orderIndex.get(buildingKey) : 9999,
+            excess: currentLevel - maxTarget
+          });
+          return;
+        }
+
+        if (currentLevel >= maxTarget) {
+          return;
+        }
+
         const nextLevel = currentLevel + 1;
         if (!areDependenciesMet(buildingKey, nextLevel, state.levels)) {
           return;
@@ -1308,9 +1654,6 @@
           return;
         }
 
-        const normalizedRange = normalizeRange(preset.targets[buildingKey]) || [0, targetMaxByKey[buildingKey]];
-        const minTarget = normalizedRange[0];
-        const maxTarget = normalizedRange[1];
         const kind = nextLevel <= minTarget ? "required" : "optional";
         const baseScore = waitSeconds + buildSeconds;
         let score = baseScore;
@@ -1343,7 +1686,9 @@
           waitSeconds,
           buildSeconds,
           score,
-          order: orderIndex.has(buildingKey) ? orderIndex.get(buildingKey) : 9999
+          order: orderIndex.has(buildingKey) ? orderIndex.get(buildingKey) : 9999,
+          action: "upgrade",
+          excess: 0
         });
       });
 
@@ -1352,10 +1697,30 @@
       }
 
       candidates.sort((a, b) => {
-        const aGroup = a.kind === "required" ? 0 : 1;
-        const bGroup = b.kind === "required" ? 0 : 1;
+        const getGroup = (kind) => {
+          if (kind === "required_downgrade") {
+            return 0;
+          }
+          if (kind === "required") {
+            return 1;
+          }
+          return 2;
+        };
+        const aGroup = getGroup(a.kind);
+        const bGroup = getGroup(b.kind);
         if (aGroup !== bGroup) {
           return aGroup - bGroup;
+        }
+        if (aGroup === 0) {
+          if (b.excess !== a.excess) {
+            return b.excess - a.excess;
+          }
+          if (a.order !== b.order) {
+            return b.order - a.order;
+          }
+          const aLabel = BUILDING_LABELS[a.key] || a.key;
+          const bLabel = BUILDING_LABELS[b.key] || b.key;
+          return aLabel.localeCompare(bLabel, "fr");
         }
         if (a.score !== b.score) {
           return a.score - b.score;
@@ -1374,11 +1739,14 @@
       });
 
       const chosen = candidates[0];
-      const duration = chosen.waitSeconds + chosen.buildSeconds;
-      advanceResources(state.resources, state.productionPerSecond, duration, state.storageCapacity);
-      RESOURCE_KEYS.forEach((resourceKey) => {
-        state.resources[resourceKey] = Math.max(0, (state.resources[resourceKey] || 0) - (chosen.cost[resourceKey] || 0));
-      });
+      const isDowngrade = chosen.action === "downgrade";
+      const duration = isDowngrade ? 0 : (chosen.waitSeconds + chosen.buildSeconds);
+      if (!isDowngrade) {
+        advanceResources(state.resources, state.productionPerSecond, duration, state.storageCapacity);
+        RESOURCE_KEYS.forEach((resourceKey) => {
+          state.resources[resourceKey] = Math.max(0, (state.resources[resourceKey] || 0) - (chosen.cost[resourceKey] || 0));
+        });
+      }
 
       state.levels[chosen.key] = chosen.nextLevel;
       if (chosen.key === "dock") {
@@ -1408,11 +1776,14 @@
       plan.push({
         key: chosen.key,
         kind: chosen.kind,
+        action: chosen.action,
         level: chosen.level,
         targetLevel: chosen.nextLevel,
         min: chosen.min,
         max: chosen.max,
-        gap: Math.max(0, chosen.max - chosen.nextLevel),
+        gap: chosen.action === "downgrade"
+          ? Math.max(0, chosen.nextLevel - chosen.max)
+          : Math.max(0, chosen.max - chosen.nextLevel),
         order: chosen.order,
         waitSeconds: chosen.waitSeconds,
         buildSeconds: chosen.buildSeconds,
@@ -1425,21 +1796,160 @@
     return plan.length ? plan : fallbackPlan;
   }
 
+  function getPresetStorageKeyForTown(townOverride) {
+    const town = townOverride || getTown();
+    const townIdentifier = getTownIdentifier(town);
+    if (!townIdentifier || townIdentifier === "unknown") {
+      return null;
+    }
+    const hostScope = window.location.hostname || "unknown_host";
+    return `${PRESET_BY_TOWN_KEY_PREFIX}_${hostScope}_${getSelectedWorldMode()}_${townIdentifier}`;
+  }
+
+  function isValidPresetKeyForMode(key, presets) {
+    return key === CUSTOM_PRESET_ID || (key && presets && presets[key]);
+  }
+
+  function getAssignedPresetForTown(townOverride, presetsOverride) {
+    const presets = presetsOverride || getPresetMap();
+    const townStorageKey = getPresetStorageKeyForTown(townOverride);
+    if (!townStorageKey) {
+      return null;
+    }
+    const storedForTown = localStorage.getItem(townStorageKey);
+    return isValidPresetKeyForMode(storedForTown, presets) ? storedForTown : null;
+  }
+
+  function assignPresetToTown(presetKey, townOverride) {
+    const presets = getPresetMap();
+    if (!isValidPresetKeyForMode(presetKey, presets)) {
+      return false;
+    }
+    const townStorageKey = getPresetStorageKeyForTown(townOverride);
+    if (!townStorageKey) {
+      return false;
+    }
+    localStorage.setItem(townStorageKey, presetKey);
+    return true;
+  }
+
   function getSelectedPreset() {
     const presets = getPresetMap();
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === CUSTOM_PRESET_ID || (stored && presets[stored])) {
+    if (isValidPresetKeyForMode(stored, presets)) {
       return stored;
     }
     return getDefaultPresetKey(presets);
   }
 
   function setSelectedPreset(key) {
+    const presets = getPresetMap();
+    if (!isValidPresetKeyForMode(key, presets)) {
+      return;
+    }
     localStorage.setItem(STORAGE_KEY, key);
   }
 
   function getIconUrl(buildingKey) {
     return ASSETS.icons[buildingKey] || null;
+  }
+
+  function getDioTownIconCodeForPreset(presetKey, presetConfig) {
+    if (presetKey && DIO_TOWN_ICON_CODE_BY_PRESET[presetKey]) {
+      return DIO_TOWN_ICON_CODE_BY_PRESET[presetKey];
+    }
+
+    const label = String((presetConfig && presetConfig.label) || "").toLowerCase();
+    const isDef = /\bdef\b/.test(label);
+    const isOff = /\boff\b/.test(label);
+    if (label.includes("nav")) {
+      return isDef ? "sd" : (isOff ? "so" : null);
+    }
+    if (label.includes("terre")) {
+      return isDef ? "ld" : (isOff ? "lo" : null);
+    }
+    if (label.includes("myth")) {
+      return isDef ? "fd" : (isOff ? "fo" : null);
+    }
+
+    const specialKey = normalizeBuildingKey(
+      presetConfig &&
+      presetConfig.specialBuilding &&
+      presetConfig.specialBuilding.key
+    );
+    if (specialKey === "lighthouse") {
+      return "sd";
+    }
+    if (specialKey === "tower") {
+      return "ld";
+    }
+    if (specialKey === "thermal") {
+      return "lo";
+    }
+
+    return null;
+  }
+
+  function syncDioTownIconWithAssignedPreset(town, assignedPresetKey, assignedPresetConfig) {
+    if (!town || !assignedPresetKey) {
+      return;
+    }
+
+    const dioCode = getDioTownIconCodeForPreset(assignedPresetKey, assignedPresetConfig);
+    if (!dioCode) {
+      return;
+    }
+
+    const townIconRoot = document.getElementById("town_icon");
+    if (!townIconRoot) {
+      return;
+    }
+
+    const desiredOption = townIconRoot.querySelector(`.select_town_icon .option_s[name="${dioCode}"]`);
+    const selectedOption = townIconRoot.querySelector(".select_town_icon .option_s.sel");
+    const selectedName = selectedOption ? selectedOption.getAttribute("name") : "";
+
+    if (desiredOption && selectedName !== dioCode) {
+      try {
+        desiredOption.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+      } catch (_) {
+        try {
+          desiredOption.click();
+        } catch (_) {}
+      }
+    }
+
+    const iconElement = townIconRoot.querySelector(".icon_big");
+    if (!iconElement) {
+      return;
+    }
+
+    iconElement.className = `icon_big townicon_${dioCode} auto`;
+    const index = DIO_TOWN_ICON_INDEX_BY_CODE[dioCode];
+    if (Number.isFinite(index)) {
+      iconElement.style.backgroundPosition = `${index * -25}px 0px`;
+    }
+  }
+
+  function getQueueIconCandidates(buildingKey) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    const aliases = getAliasesForBuilding(canonical);
+    const out = [];
+    const pushUnique = (value) => {
+      if (!value || out.includes(value)) {
+        return;
+      }
+      out.push(value);
+    };
+
+    aliases.forEach((alias) => {
+      pushUnique(`${CDN_BASE}/images/game/buildings/${alias}.png`);
+      pushUnique(`${CDN_BASE}/images/game/buildings/${alias}_passive.png`);
+      pushUnique(`${CDN_BASE}/images/game/main/${alias}.png`);
+    });
+
+    pushUnique(getIconUrl(canonical));
+    return out;
   }
 
   function getTown() {
@@ -1685,7 +2195,7 @@
     }
   }
 
-  function extractOrderFromRawModel(raw, townId, levels, strictTownFilter) {
+  function extractOrderFromRawModel(raw, townId, levels, strictTownFilter, sourceIndex) {
     const attrs = raw && raw.attributes && typeof raw.attributes === "object"
       ? raw.attributes
       : raw;
@@ -1708,9 +2218,7 @@
       attrs.destroy ||
       attrs.is_teardown
     );
-    if (isTearDown) {
-      return null;
-    }
+    const action = isTearDown ? "downgrade" : "upgrade";
 
     const rawKey = attrs.building_type || attrs.building || attrs.type || attrs.item_name || attrs.name;
     const key = normalizeBuildingKey(rawKey);
@@ -1723,11 +2231,24 @@
       0
     );
     if (targetLevel <= 0) {
-      targetLevel = Math.max(1, getLevelForBuilding(levels, key) + 1);
+      const currentLevel = Math.max(0, getLevelForBuilding(levels, key));
+      targetLevel = action === "downgrade"
+        ? Math.max(0, currentLevel - 1)
+        : Math.max(1, currentLevel + 1);
     }
 
     const queuePos = toInt(
-      pickFirstFiniteNumber(attrs.queue_pos, attrs.queue_position, attrs.queue_order, attrs.sort_order),
+      pickFirstFiniteNumber(
+        attrs.queue_pos,
+        attrs.queue_position,
+        attrs.queue_order,
+        attrs.sort_order,
+        attrs.position,
+        attrs.order,
+        attrs.pos,
+        attrs.sort,
+        attrs.index
+      ),
       9999
     );
 
@@ -1755,15 +2276,313 @@
     return {
       id: String(uid),
       key,
+      action,
       targetLevel,
       queuePos,
-      remainingSeconds: remainingSeconds !== null ? Math.max(0, Number(remainingSeconds)) : null
+      remainingSeconds: remainingSeconds !== null ? Math.max(0, Number(remainingSeconds)) : null,
+      sourceIndex: toInt(sourceIndex, 9999)
     };
+  }
+
+  function extractOrderFromDomNode(node, levels, sourceIndex) {
+    if (!(node instanceof Element)) {
+      return null;
+    }
+    if (node.classList.contains("empty_slot")) {
+      return null;
+    }
+    if (!node.classList.contains("queued_building_order")) {
+      return null;
+    }
+
+    const isTearDown = node.classList.contains("tearing_down") || Boolean(node.querySelector(".tear_down"));
+    const action = isTearDown ? "downgrade" : "upgrade";
+
+    let key = null;
+    const classTokens = Array.from(node.classList);
+    for (const token of classTokens) {
+      const normalized = normalizeBuildingKey(token);
+      if (KNOWN_BUILDING_KEYS.includes(normalized)) {
+        key = normalized;
+        break;
+      }
+    }
+
+    if (!key) {
+      const icon = node.querySelector(".js-item-icon, [class*='building_icon40x40']");
+      if (icon instanceof Element) {
+        const iconTokens = Array.from(icon.classList);
+        for (const token of iconTokens) {
+          const normalized = normalizeBuildingKey(token);
+          if (KNOWN_BUILDING_KEYS.includes(normalized)) {
+            key = normalized;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!key) {
+      return null;
+    }
+
+    const levelText = (node.querySelector(".building_level") && node.querySelector(".building_level").textContent) || "";
+    const levelMatches = levelText.match(/\d+/g);
+    let targetLevel = toInt(levelMatches && levelMatches.length ? levelMatches[levelMatches.length - 1] : 0, 0);
+    if (targetLevel <= 0) {
+      const currentLevel = Math.max(0, getLevelForBuilding(levels, key));
+      targetLevel = action === "downgrade"
+        ? Math.max(0, currentLevel - 1)
+        : Math.max(1, currentLevel + 1);
+    }
+
+    const countdownCandidates = [
+      node.querySelector(".countdown.js-item-countdown"),
+      node.querySelector(".js-item-countdown"),
+      node.querySelector(".single-progressbar .curr"),
+      node.querySelector(".single-progressbar .value_container")
+    ];
+    let remainingSeconds = null;
+    for (const candidate of countdownCandidates) {
+      if (!(candidate instanceof Element)) {
+        continue;
+      }
+      const parsed = parseDurationToSeconds(candidate.textContent || "");
+      if (parsed !== null && Number.isFinite(parsed) && parsed >= 0) {
+        remainingSeconds = parsed;
+        break;
+      }
+    }
+
+    let queuePos = toInt(node.getAttribute("data-order_index"), 9999);
+    if (!Number.isFinite(queuePos) || queuePos >= 9999) {
+      queuePos = toInt(sourceIndex, 9999);
+    }
+
+    const orderIdFromClass = classTokens
+      .map((token) => {
+        const match = token.match(/^order_id_(\d+)$/);
+        return match ? match[1] : null;
+      })
+      .find((value) => Boolean(value));
+    const uid = node.getAttribute("data-order_id") || orderIdFromClass || `${key}:${targetLevel}:${queuePos}`;
+
+    return {
+      id: String(uid),
+      key,
+      action,
+      targetLevel,
+      queuePos,
+      remainingSeconds: remainingSeconds !== null ? Math.max(0, Number(remainingSeconds)) : null,
+      sourceIndex: toInt(sourceIndex, 9999)
+    };
+  }
+
+  function findNativeBuildingQueueContainer() {
+    const containers = Array.from(document.querySelectorAll(
+      ".ui_construction_queue .construction_queue_order_container .ui_various_orders, .js-construction-queue .construction_queue_order_container .ui_various_orders, .construction_queue_order_container .ui_various_orders"
+    ));
+    if (!containers.length) {
+      return null;
+    }
+    const buildingContainers = containers.filter((container) => {
+      const className = container.className || "";
+      return /type_building_queue/.test(className);
+    });
+    const candidates = buildingContainers.length ? buildingContainers : containers;
+    return candidates.find((container) => container.querySelector(".queued_building_order, .js-queue-item[data-order_id]")) || candidates[0] || null;
+  }
+
+  function findNativeBuildingQueueVisualRoot() {
+    const list = findNativeBuildingQueueContainer();
+    if (!list) {
+      return null;
+    }
+    return list.closest(".construction_queue_order_container") || list;
+  }
+
+  function findNativePlanTable() {
+    if (!document) {
+      return null;
+    }
+    const selectors = [
+      ".game_border table.game_table",
+      "table.game_table",
+      "table[class*='game_table']",
+      ".game_border table",
+      ".window_content table"
+    ];
+    const seen = new Set();
+    for (const selector of selectors) {
+      const candidates = Array.from(document.querySelectorAll(selector));
+      for (const table of candidates) {
+        if (!(table instanceof HTMLTableElement)) {
+          continue;
+        }
+        if (table.closest(`#${PANEL_ID}`)) {
+          continue;
+        }
+        if (seen.has(table)) {
+          continue;
+        }
+        seen.add(table);
+        const className = table.className || "";
+        if (!/game|table|border|list/i.test(className)) {
+          continue;
+        }
+        const thCount = table.querySelectorAll("thead th").length;
+        const tdCount = table.querySelectorAll("tbody td").length;
+        if (thCount < 2 || tdCount < 2) {
+          continue;
+        }
+        return table;
+      }
+    }
+    return null;
+  }
+
+  function applyNativePlanTableSkin(panel) {
+    if (!panel) {
+      return;
+    }
+    const table = panel.querySelector(".tm-plan-table");
+    const scroll = panel.querySelector(".tm-table-scroll");
+    if (!(table instanceof HTMLTableElement) || !(scroll instanceof HTMLElement)) {
+      return;
+    }
+
+    const source = findNativePlanTable();
+    if (!source) {
+      panel.classList.remove("tm-native-table-active");
+      table.className = "tm-plan-table";
+      scroll.classList.remove("game_border");
+      return;
+    }
+
+    const sourceClasses = Array.from(source.classList).filter((cls) => cls && !/^js-/.test(cls));
+    const hasLikelyNativeClass = sourceClasses.some((cls) =>
+      cls === "game_table" || /^game_/.test(cls) || /^gp/.test(cls)
+    );
+    if (!hasLikelyNativeClass) {
+      panel.classList.remove("tm-native-table-active");
+      table.className = "tm-plan-table";
+      scroll.classList.remove("game_border");
+      return;
+    }
+
+    const mergedTableClasses = Array.from(new Set(["tm-plan-table", ...sourceClasses]));
+    table.className = mergedTableClasses.join(" ");
+    scroll.classList.add("game_border");
+    panel.classList.add("tm-native-table-active");
+  }
+
+  function sanitizeNativeQueueClone(queueRoot) {
+    if (!(queueRoot instanceof Element)) {
+      return queueRoot;
+    }
+
+    const actionSelectors = [
+      "button",
+      ".button_new",
+      ".js-order-cancel",
+      ".js-btn-cancel",
+      ".js-item-cancel",
+      ".order_cancel",
+      ".cancel_order",
+      ".btn_cancel_order",
+      ".js-order-instant-buy",
+      ".js-btn-instant-buy",
+      ".js-item-instant-buy",
+      ".btn_instant_buy",
+      ".js-instant-buy",
+      ".queued_building_order .cancel",
+      ".queued_building_order .abort",
+      ".queued_building_order .remove",
+      ".queued_building_order .close"
+    ];
+
+    actionSelectors.forEach((selector) => {
+      queueRoot.querySelectorAll(selector).forEach((node) => node.remove());
+    });
+
+    const actionWords = /terminer|finish|instant|annuler|cancel|supprimer|remove|abort|delete/i;
+    queueRoot.querySelectorAll("a, [title], [aria-label]").forEach((node) => {
+      if (!(node instanceof Element)) {
+        return;
+      }
+      if (node.classList.contains("queued_building_order") || node.classList.contains("js-queue-item")) {
+        return;
+      }
+      const text = [
+        node.textContent || "",
+        node.getAttribute("title") || "",
+        node.getAttribute("aria-label") || ""
+      ].join(" ");
+      if (actionWords.test(text)) {
+        node.remove();
+      }
+    });
+
+    return queueRoot;
+  }
+
+  function getTownBuildingOrdersFromDom(levels) {
+    if (!document || !levels) {
+      return [];
+    }
+
+    const root = findNativeBuildingQueueContainer();
+    if (!root) {
+      return [];
+    }
+    const nodes = Array.from(root.querySelectorAll(".js-queue-item"));
+    if (!nodes.length) {
+      return [];
+    }
+
+    const orders = [];
+    nodes.forEach((node, index) => {
+      const parsed = extractOrderFromDomNode(node, levels, index);
+      if (parsed) {
+        orders.push(parsed);
+      }
+    });
+
+    if (!orders.length) {
+      return [];
+    }
+
+    orders.sort((a, b) => {
+      const aHasQueuePos = Number.isFinite(a.queuePos) && a.queuePos < 9999;
+      const bHasQueuePos = Number.isFinite(b.queuePos) && b.queuePos < 9999;
+      if (aHasQueuePos && bHasQueuePos && a.queuePos !== b.queuePos) {
+        return a.queuePos - b.queuePos;
+      }
+      if (aHasQueuePos !== bHasQueuePos) {
+        return aHasQueuePos ? -1 : 1;
+      }
+      const aRem = Number.isFinite(a.remainingSeconds) ? a.remainingSeconds : Number.POSITIVE_INFINITY;
+      const bRem = Number.isFinite(b.remainingSeconds) ? b.remainingSeconds : Number.POSITIVE_INFINITY;
+      if (aRem !== bRem) {
+        return aRem - bRem;
+      }
+      if (a.sourceIndex !== b.sourceIndex) {
+        return a.sourceIndex - b.sourceIndex;
+      }
+      return a.key.localeCompare(b.key, "fr");
+    });
+
+    return orders;
   }
 
   function getTownBuildingOrders(town, levels) {
     if (!town || !levels) {
       return [];
+    }
+
+    const domOrders = getTownBuildingOrdersFromDom(levels);
+    if (domOrders.length) {
+      return domOrders;
     }
 
     const townScopedModels = [];
@@ -1821,12 +2640,14 @@
     } catch (_) {}
 
     const orders = [];
+    let sourceCounter = 0;
     townScopedModels.forEach((raw) => {
-      const parsed = extractOrderFromRawModel(raw, townId, levels, false);
+      const parsed = extractOrderFromRawModel(raw, townId, levels, false, sourceCounter);
+      sourceCounter += 1;
       if (!parsed) {
         return;
       }
-      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}`;
+      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}:${parsed.action || "upgrade"}`;
       if (visited.has(key)) {
         return;
       }
@@ -1835,11 +2656,12 @@
     });
 
     globalModels.forEach((raw) => {
-      const parsed = extractOrderFromRawModel(raw, townId, levels, true);
+      const parsed = extractOrderFromRawModel(raw, townId, levels, true, sourceCounter);
+      sourceCounter += 1;
       if (!parsed) {
         return;
       }
-      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}`;
+      const key = `${parsed.id}:${parsed.key}:${parsed.targetLevel}:${parsed.action || "upgrade"}`;
       if (visited.has(key)) {
         return;
       }
@@ -1848,13 +2670,21 @@
     });
 
     orders.sort((a, b) => {
-      if (a.queuePos !== b.queuePos) {
+      const aHasQueuePos = Number.isFinite(a.queuePos) && a.queuePos < 9999;
+      const bHasQueuePos = Number.isFinite(b.queuePos) && b.queuePos < 9999;
+      if (aHasQueuePos && bHasQueuePos && a.queuePos !== b.queuePos) {
         return a.queuePos - b.queuePos;
+      }
+      if (aHasQueuePos !== bHasQueuePos) {
+        return aHasQueuePos ? -1 : 1;
       }
       const aRem = Number.isFinite(a.remainingSeconds) ? a.remainingSeconds : Number.POSITIVE_INFINITY;
       const bRem = Number.isFinite(b.remainingSeconds) ? b.remainingSeconds : Number.POSITIVE_INFINITY;
       if (aRem !== bRem) {
         return aRem - bRem;
+      }
+      if (a.sourceIndex !== b.sourceIndex) {
+        return a.sourceIndex - b.sourceIndex;
       }
       return a.key.localeCompare(b.key, "fr");
     });
@@ -1868,7 +2698,7 @@
       return virtualLevels;
     }
 
-    const queuedCountByKey = new Map();
+    const queuedDeltaByKey = new Map();
     buildingOrders.forEach((order) => {
       if (!order || !order.key) {
         return;
@@ -1877,12 +2707,13 @@
       if (!KNOWN_BUILDING_KEYS.includes(key)) {
         return;
       }
-      queuedCountByKey.set(key, (queuedCountByKey.get(key) || 0) + 1);
+      const direction = order.action === "downgrade" ? -1 : 1;
+      queuedDeltaByKey.set(key, (queuedDeltaByKey.get(key) || 0) + direction);
     });
 
-    queuedCountByKey.forEach((count, key) => {
+    queuedDeltaByKey.forEach((delta, key) => {
       const current = getLevelForBuilding(virtualLevels, key);
-      const next = Math.max(0, current + count);
+      const next = Math.max(0, current + delta);
       virtualLevels[key] = next;
       if (key === "dock") {
         virtualLevels.docks = next;
@@ -1953,9 +2784,12 @@
       }
 
       const currentLevel = getLevelForBuilding(simLevels, key);
-      const nextLevel = currentLevel + 1;
+      const isDowngrade = order.action === "downgrade";
+      const nextLevel = isDowngrade ? Math.max(0, currentLevel - 1) : (currentLevel + 1);
       const senateLevel = getLevelForBuilding(simLevels, "main");
-      const estimatedSeconds = estimateUpgradeBuildSeconds(key, nextLevel, senateLevel, worldSpeed, timeCache);
+      const estimatedSeconds = isDowngrade
+        ? 0
+        : estimateUpgradeBuildSeconds(key, nextLevel, senateLevel, worldSpeed, timeCache);
       const queueRemaining = pickFirstFiniteNumber(order.remainingSeconds);
       const hasEstimated = Number.isFinite(estimatedSeconds) && estimatedSeconds > 0;
       const shouldUseRemaining = Number.isFinite(queueRemaining) && queueRemaining >= 0
@@ -2177,6 +3011,20 @@
     return `${secs}s`;
   }
 
+  function formatClockDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return "--:--:--";
+    }
+    const rounded = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const secs = rounded % 60;
+    const hh = String(hours).padStart(2, "0");
+    const mm = String(minutes).padStart(2, "0");
+    const ss = String(secs).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
   function formatTarget(range) {
     if (!Array.isArray(range) || range.length !== 2) {
       return "-";
@@ -2222,7 +3070,7 @@
       top: Math.max(0, top),
       right: Math.max(0, right),
       left: left === null ? null : Math.max(0, left),
-      width: Math.max(260, width),
+      width: Math.max(MIN_PANEL_WIDTH, width),
       height: Math.max(0, height)
     };
   }
@@ -2276,7 +3124,7 @@
       top: Math.max(0, Math.round(rect.top)),
       left: Math.max(0, Math.round(rect.left)),
       right: DEFAULT_PANEL_LAYOUT.right,
-      width: Math.max(260, Math.round(rect.width)),
+      width: Math.max(MIN_PANEL_WIDTH, Math.round(rect.width)),
       height: hasManualHeight ? Math.max(220, Math.round(rect.height)) : 0
     };
     savePanelLayout(layout);
@@ -2378,7 +3226,7 @@
     });
   }
 
-  function populatePresetSelect(select) {
+  function populatePresetSelect(select, townOverride) {
     if (!select) {
       return;
     }
@@ -2444,11 +3292,6 @@
               <select class="tm-preset-select"></select>
             </label>
             <div class="tm-actions">
-              <button type="button" class="tm-clone-btn button_new">
-                <div class="left"></div>
-                <div class="right"></div>
-                <div class="caption js-caption"><span class="tm-btn-label">Cloner en perso</span><div class="effect js-effect"></div></div>
-              </button>
               <button type="button" class="tm-edit-btn button_new">
                 <div class="left"></div>
                 <div class="right"></div>
@@ -2469,12 +3312,29 @@
                 <div class="right"></div>
                 <div class="caption js-caption"><span class="tm-btn-label">Reset fenetre</span><div class="effect js-effect"></div></div>
               </button>
+              <button type="button" class="tm-queue-toggle-btn button_new">
+                <div class="left"></div>
+                <div class="right"></div>
+                <div class="caption js-caption"><span class="tm-btn-label">Afficher file</span><div class="effect js-effect"></div></div>
+              </button>
+              <button type="button" class="tm-table-toggle-btn button_new">
+                <div class="left"></div>
+                <div class="right"></div>
+                <div class="caption js-caption"><span class="tm-btn-label">Afficher tout</span><div class="effect js-effect"></div></div>
+              </button>
+              <button type="button" class="tm-assign-btn button_new">
+                <div class="left"></div>
+                <div class="right"></div>
+                <div class="caption js-caption"><span class="tm-btn-label">Assigner ville</span><div class="effect js-effect"></div></div>
+              </button>
             </div>
           </div>
           <div class="tm-town-name">Ville active</div>
+          <div class="tm-town-preset">Type sauvegarde: -</div>
           <div class="tm-next-action"></div>
           <div class="tm-special-building"></div>
           <div class="tm-plan-preview"></div>
+          <div class="tm-queue-list"></div>
           <div class="tm-body">
             <div class="tm-table-scroll">
               <table class="tm-plan-table">
@@ -2512,11 +3372,11 @@
     worldSelect.value = getSelectedWorldMode();
     worldSelect.addEventListener("change", () => {
       setSelectedWorldMode(worldSelect.value);
-      populatePresetSelect(select);
+      populatePresetSelect(select, getTown());
       safeRender(true);
     });
 
-    populatePresetSelect(select);
+    populatePresetSelect(select, getTown());
     select.addEventListener("change", () => {
       setSelectedPreset(select.value);
       if (select.value !== CUSTOM_PRESET_ID) {
@@ -2547,22 +3407,10 @@
       });
     }
 
-    const cloneBtn = panel.querySelector(".tm-clone-btn");
-    if (cloneBtn) {
-      cloneBtn.addEventListener("click", () => {
-        const currentConfig = getPresetConfig(getSelectedPreset());
-        saveCustomTargets(cloneTargets(currentConfig.targets));
-        setSelectedPreset(CUSTOM_PRESET_ID);
-        select.value = CUSTOM_PRESET_ID;
-        isCustomEditMode = true;
-        safeRender(true);
-      });
-    }
-
     const editBtn = panel.querySelector(".tm-edit-btn");
     if (editBtn) {
       editBtn.addEventListener("click", () => {
-        if (getSelectedPreset() !== CUSTOM_PRESET_ID) {
+        if (select.value !== CUSTOM_PRESET_ID) {
           return;
         }
         isCustomEditMode = !isCustomEditMode;
@@ -2578,7 +3426,7 @@
           return;
         }
 
-        const currentConfig = getPresetConfig(getSelectedPreset());
+        const currentConfig = getPresetConfig(select.value);
         const wrapByKey = new Map();
         wrappers.forEach((wrap) => {
           const key = wrap.getAttribute("data-building-key");
@@ -2637,10 +3485,38 @@
       });
     }
 
+    const assignBtn = panel.querySelector(".tm-assign-btn");
+    if (assignBtn) {
+      assignBtn.addEventListener("click", () => {
+        const currentTown = getTown();
+        if (!currentTown) {
+          return;
+        }
+        if (!assignPresetToTown(select.value, currentTown)) {
+          return;
+        }
+        safeRender(true);
+      });
+    }
+
     const layoutResetBtn = panel.querySelector(".tm-layout-reset-btn");
     if (layoutResetBtn) {
       layoutResetBtn.addEventListener("click", () => {
         resetPanelLayout(panel);
+        safeRender(true);
+      });
+    }
+    const queueToggleBtn = panel.querySelector(".tm-queue-toggle-btn");
+    if (queueToggleBtn) {
+      queueToggleBtn.addEventListener("click", () => {
+        isQueueDetailsVisible = !isQueueDetailsVisible;
+        safeRender(true);
+      });
+    }
+    const tableToggleBtn = panel.querySelector(".tm-table-toggle-btn");
+    if (tableToggleBtn) {
+      tableToggleBtn.addEventListener("click", () => {
+        isFullTableVisible = !isFullTableVisible;
         safeRender(true);
       });
     }
@@ -2663,23 +3539,38 @@
       }
     };
 
-    const cloneBtn = panel.querySelector(".tm-clone-btn");
     const editBtn = panel.querySelector(".tm-edit-btn");
     const applyBtn = panel.querySelector(".tm-apply-btn");
     const resetBtn = panel.querySelector(".tm-reset-btn");
-    if (!cloneBtn || !editBtn || !applyBtn || !resetBtn) {
+    const queueToggleBtn = panel.querySelector(".tm-queue-toggle-btn");
+    const tableToggleBtn = panel.querySelector(".tm-table-toggle-btn");
+    const assignBtn = panel.querySelector(".tm-assign-btn");
+    const selectedValue = (panel.querySelector(".tm-preset-select") && panel.querySelector(".tm-preset-select").value) || presetConfig.key;
+    const currentTown = getTown();
+    const assignedPreset = getAssignedPresetForTown(currentTown);
+    if (queueToggleBtn) {
+      setButtonLabel(queueToggleBtn, isQueueDetailsVisible ? "Masquer file" : "Afficher file");
+    }
+    if (tableToggleBtn) {
+      setButtonLabel(tableToggleBtn, isFullTableVisible ? "Afficher 4 lignes" : "Afficher tout");
+      tableToggleBtn.style.display = presetConfig.isCustom && isCustomEditMode ? "none" : "inline-block";
+    }
+    if (assignBtn) {
+      const isAlreadyAssigned = Boolean(currentTown && assignedPreset && assignedPreset === selectedValue);
+      setButtonLabel(assignBtn, isAlreadyAssigned ? "Type assigne" : "Assigner ville");
+      assignBtn.disabled = !currentTown || isAlreadyAssigned;
+    }
+    if (!editBtn || !applyBtn || !resetBtn) {
       return;
     }
 
     if (presetConfig.isCustom) {
-      cloneBtn.style.display = "none";
       editBtn.style.display = "inline-block";
       resetBtn.style.display = "inline-block";
       applyBtn.style.display = "inline-block";
       applyBtn.disabled = !isCustomEditMode;
       setButtonLabel(editBtn, isCustomEditMode ? "Annuler edition" : "Modifier perso");
     } else {
-      cloneBtn.style.display = "inline-block";
       editBtn.style.display = "none";
       resetBtn.style.display = "none";
       applyBtn.style.display = "none";
@@ -2699,8 +3590,8 @@
         position: fixed;
         right: 12px;
         top: 86px;
-        width: 420px;
-        min-width: 340px;
+        width: ${DEFAULT_PANEL_LAYOUT.width}px;
+        min-width: ${MIN_PANEL_WIDTH}px;
         min-height: 280px;
         max-width: min(95vw, 820px);
         max-height: 92vh;
@@ -2761,6 +3652,7 @@
 
       #${PANEL_ID} .tm-controls,
       #${PANEL_ID} .tm-town-name,
+      #${PANEL_ID} .tm-town-preset,
       #${PANEL_ID} .tm-next-action,
       #${PANEL_ID} .tm-special-building,
       #${PANEL_ID} .tm-plan-preview,
@@ -2822,7 +3714,10 @@
       #${PANEL_ID} .tm-actions {
         margin-top: 8px;
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(2, 168px);
+        justify-content: start;
+        width: max-content;
+        max-width: 100%;
         gap: 6px;
       }
 
@@ -2837,6 +3732,19 @@
 
       #${PANEL_ID} .tm-actions .button_new {
         width: 100%;
+      }
+
+      #${PANEL_ID} .tm-actions .tm-edit-btn,
+      #${PANEL_ID} .tm-actions .tm-apply-btn,
+      #${PANEL_ID} .tm-actions .tm-reset-btn,
+      #${PANEL_ID} .tm-actions .tm-layout-reset-btn,
+      #${PANEL_ID} .tm-actions .tm-queue-toggle-btn,
+      #${PANEL_ID} .tm-actions .tm-table-toggle-btn,
+      #${PANEL_ID} .tm-actions .tm-assign-btn {
+        width: 168px;
+        min-width: 168px;
+        max-width: 168px;
+        justify-self: start;
       }
 
       #${PANEL_ID} .tm-actions .button_new .caption {
@@ -2857,6 +3765,12 @@
         border-top: 1px solid rgba(119, 78, 34, 0.35);
       }
 
+      #${PANEL_ID} .tm-town-preset {
+        color: #6a4218;
+        border-top: 1px solid rgba(119, 78, 34, 0.25);
+        font-weight: 700;
+      }
+
       #${PANEL_ID} .tm-next-action,
       #${PANEL_ID} .tm-special-building,
       #${PANEL_ID} .tm-plan-preview {
@@ -2865,6 +3779,145 @@
 
       #${PANEL_ID} .tm-plan-preview {
         border-bottom: 1px solid rgba(119, 78, 34, 0.25);
+      }
+
+      #${PANEL_ID} .tm-queue-list {
+        display: none;
+        margin: 0 8px;
+        padding: 0;
+        background: transparent;
+      }
+
+      #${PANEL_ID} .tm-queue-list.tm-open {
+        display: block;
+      }
+
+      #${PANEL_ID} .tm-queue-list.tm-queue-native {
+        padding: 6px 8px 4px;
+      }
+
+      #${PANEL_ID} .tm-queue-list.tm-queue-native .construction_queue_order_container {
+        position: static;
+        left: auto;
+        top: auto;
+        right: auto;
+        bottom: auto;
+      }
+
+      #${PANEL_ID} .tm-queue-list.tm-queue-native .ui_various_orders::after {
+        content: "";
+        display: block;
+        clear: both;
+      }
+
+      #${PANEL_ID} .tm-queue-list.tm-queue-native .js-queue-item,
+      #${PANEL_ID} .tm-queue-list.tm-queue-native .button_new,
+      #${PANEL_ID} .tm-queue-list.tm-queue-native a,
+      #${PANEL_ID} .tm-queue-list.tm-queue-native button {
+        pointer-events: none !important;
+      }
+
+      #${PANEL_ID} .tm-queue-strip {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 0;
+        align-items: flex-start;
+        justify-content: flex-start;
+      }
+
+      #${PANEL_ID} .tm-queue-slot {
+        position: relative;
+        width: 50px;
+        height: 50px;
+        flex: 0 0 50px;
+        overflow: hidden;
+        margin: 9px 10px;
+        padding: 0;
+        border: 0;
+        box-shadow: none;
+        color: rgb(0, 0, 0);
+        font: 700 9px Verdana, Arial, Helvetica, sans-serif;
+        font-family: Verdana, Arial, Helvetica, sans-serif;
+        font-weight: 700;
+        background: rgba(0, 0, 0, 0) url("${CDN_BASE}/images/game/autogenerated/layout/construction_queue/construction_queue_2.74.png") no-repeat -308px -92px;
+      }
+
+      #${PANEL_ID} .tm-queue-slot.tm-empty {
+        background: rgba(0, 0, 0, 0) url("${CDN_BASE}/images/game/autogenerated/layout/construction_queue/construction_queue_2.74.png") no-repeat -308px -92px;
+        opacity: 1;
+      }
+
+      #${PANEL_ID} .tm-queue-slot img {
+        position: absolute;
+        left: 0;
+        top: 7px;
+        width: 50px;
+        height: 37px;
+        object-fit: contain;
+        pointer-events: none;
+        image-rendering: auto;
+      }
+
+      #${PANEL_ID} .tm-queue-points {
+        position: absolute;
+        left: 2px;
+        top: 0;
+        max-width: calc(100% - 2px);
+        color: #89f966;
+        font: 700 16px/1 Verdana, Arial, Helvetica, sans-serif;
+        text-shadow:
+          -1px -1px 0 #0d2b10,
+          1px -1px 0 #0d2b10,
+          -1px 1px 0 #0d2b10,
+          1px 1px 0 #0d2b10,
+          0 0 1px #0d2b10;
+        z-index: 2;
+        pointer-events: none;
+        white-space: nowrap;
+      }
+
+      #${PANEL_ID} .tm-queue-timer {
+        position: absolute;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #ffd95c;
+        background: rgba(14, 20, 31, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 0 2px 1px;
+        font: 700 10px/1 Verdana, Arial, Helvetica, sans-serif;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.85);
+        white-space: nowrap;
+        z-index: 3;
+        pointer-events: none;
+      }
+
+      #${PANEL_ID} .tm-queue-level {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        min-width: 16px;
+        color: #a8ecff;
+        background: linear-gradient(180deg, rgba(64, 111, 175, 0.95) 0%, rgba(28, 56, 97, 0.95) 100%);
+        border-top: 1px solid rgba(168, 223, 255, 0.55);
+        border-right: 1px solid rgba(66, 111, 167, 0.75);
+        padding: 1px 2px 1px 1px;
+        font: 700 10px/1 Verdana, Arial, Helvetica, sans-serif;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.85);
+        z-index: 3;
+        pointer-events: none;
+        clip-path: polygon(0 0, 100% 0, 78% 100%, 0 100%);
+      }
+
+      #${PANEL_ID} .tm-queue-overflow {
+        margin-top: 0;
+        margin-left: 10px;
+        color: #6a4218;
+        font: 700 10px/1 Verdana, Arial, Helvetica, sans-serif;
+      }
+
+      #${PANEL_ID} .tm-queue-empty {
+        color: #6b5840;
       }
 
       #${PANEL_ID}:not(.tm-editing-targets) .tm-hint {
@@ -2877,75 +3930,146 @@
 
       #${PANEL_ID} .tm-table-scroll {
         margin: 8px 8px 0;
-        overflow-x: auto;
-        overflow-y: hidden;
+        padding: 2px;
+        border: 1px solid rgba(66, 42, 18, 0.92);
+        background:
+          linear-gradient(180deg, rgba(108, 72, 33, 0.92) 0%, rgba(69, 44, 20, 0.92) 100%),
+          url("${ASSETS.ui.panelOverlay}");
+        box-shadow:
+          inset 0 1px 0 rgba(255, 230, 173, 0.22),
+          inset 0 -1px 0 rgba(22, 13, 6, 0.62);
+        overflow-x: hidden;
+        overflow-y: visible;
+      }
+
+      #${PANEL_ID}.tm-native-table-active .tm-table-scroll {
+        padding: 0;
+        border: 0;
+        background: none;
+        box-shadow: none;
       }
 
       #${PANEL_ID} .tm-plan-table {
         width: 100%;
-        min-width: 690px;
+        min-width: 0;
         border-collapse: collapse;
-        table-layout: fixed;
+        table-layout: auto;
+        background:
+          linear-gradient(180deg, rgba(112, 76, 34, 0.82) 0%, rgba(68, 44, 20, 0.82) 100%),
+          url("${ASSETS.ui.panelOverlay}");
         box-shadow:
-          inset 0 1px 0 rgba(255, 240, 202, 0.28),
-          0 0 0 1px rgba(82, 53, 22, 0.42);
+          inset 0 1px 0 rgba(255, 236, 189, 0.36),
+          inset 0 -1px 0 rgba(28, 17, 8, 0.56),
+          0 0 0 1px rgba(66, 42, 18, 0.98);
+      }
+
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table {
+        background: none;
+        box-shadow: none;
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-prio {
-        width: 76px;
-        min-width: 76px;
+        width: 1%;
+        min-width: 0;
         text-align: center;
         white-space: nowrap;
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-building {
-        width: 188px;
-        min-width: 188px;
+        width: auto;
+        min-width: 0;
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-state {
-        width: 210px;
-        min-width: 210px;
+        width: auto;
+        min-width: 0;
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-target {
-        width: 216px;
-        min-width: 216px;
+        width: auto;
+        min-width: 0;
       }
 
       #${PANEL_ID} .tm-plan-table th,
       #${PANEL_ID} .tm-plan-table td {
         box-sizing: border-box;
-        border: 1px solid rgba(116, 79, 35, 0.62);
+        border: 0;
+        border-right: 1px solid rgb(208, 190, 151);
+        border-bottom: 1px solid rgb(208, 190, 151);
         padding: 5px 7px;
         text-align: left;
         vertical-align: top;
-      }
-
-      #${PANEL_ID} .tm-plan-table th {
-        background-image:
-          linear-gradient(180deg, rgba(153, 107, 49, 0.97) 0%, rgba(96, 65, 29, 0.97) 100%),
-          url("${ASSETS.ui.panelOverlay}");
-        background-repeat: repeat;
-        color: #ffe4b2;
-        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.58);
-        box-shadow:
-          inset 0 1px 0 rgba(245, 208, 140, 0.32),
-          inset 0 -1px 0 rgba(38, 24, 11, 0.48);
-      }
-
-      #${PANEL_ID} .tm-plan-table td {
-        background: linear-gradient(180deg, rgba(246, 232, 199, 0.23) 0%, rgba(196, 167, 120, 0.21) 100%);
         overflow-wrap: anywhere;
         word-break: break-word;
       }
 
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table th,
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table td {
+        border: 0;
+        box-shadow: none;
+        color: inherit;
+        text-shadow: inherit;
+        background: none;
+      }
+
+      #${PANEL_ID} .tm-plan-table th:first-child,
+      #${PANEL_ID} .tm-plan-table td:first-child {
+        border-left: 1px solid rgb(208, 190, 151);
+      }
+
+      #${PANEL_ID} .tm-plan-table th:last-child,
+      #${PANEL_ID} .tm-plan-table td:last-child {
+        border-right: 0;
+      }
+
+      #${PANEL_ID} .tm-plan-table th {
+        background-image: url("${CDN_BASE}/images/game/border/header.png");
+        background-position: 0 -1px;
+        background-repeat: repeat;
+        color: #ffffff;
+        text-shadow: none;
+        border-right-color: rgba(0, 0, 0, 0.35);
+        border-left-color: rgba(0, 0, 0, 0.35);
+        border-bottom-color: #000000;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.08),
+          inset 0 -1px 0 rgba(0, 0, 0, 0.45);
+      }
+
+      #${PANEL_ID} .tm-plan-table .tm-col-target.tm-has-tooltip {
+        cursor: help;
+      }
+
+      #${PANEL_ID} .tm-plan-table td {
+        background-color: transparent;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      #${PANEL_ID} .tm-plan-table tbody tr:nth-child(odd) td {
+        background-image: url("${CDN_BASE}/images/game/border/odd.png");
+        background-repeat: repeat;
+        border-bottom-color: rgb(208, 190, 151);
+      }
+
       #${PANEL_ID} .tm-plan-table tbody tr:nth-child(even) td {
-        background: linear-gradient(180deg, rgba(233, 213, 176, 0.26) 0%, rgba(182, 150, 104, 0.24) 100%);
+        background-image: url("${CDN_BASE}/images/game/border/even.png");
+        background-repeat: repeat;
+        border-bottom-color: rgb(208, 190, 151);
+      }
+
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table tbody tr:nth-child(odd) td,
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table tbody tr:nth-child(even) td,
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table th {
+        background-image: none;
       }
 
       #${PANEL_ID} .tm-plan-table tbody tr:hover td {
-        background-color: rgba(166, 124, 66, 0.22);
+        box-shadow: inset 0 0 0 9999px rgba(255, 255, 255, 0.08);
+      }
+
+      #${PANEL_ID}.tm-native-table-active .tm-plan-table tbody tr:hover td {
+        box-shadow: none;
       }
 
       #${PANEL_ID} .tm-plan-table td:nth-child(1) {
@@ -2953,6 +4077,7 @@
         white-space: nowrap;
       }
 
+      #${PANEL_ID} .tm-plan-table td:nth-child(2),
       #${PANEL_ID} .tm-plan-table td:nth-child(3),
       #${PANEL_ID} .tm-plan-table td:nth-child(4) {
         white-space: normal;
@@ -2975,8 +4100,8 @@
       }
 
       #${PANEL_ID} .tm-building-icon {
-        width: 40px;
-        height: 40px;
+        width: 34px;
+        height: 34px;
         object-fit: contain;
         flex: 0 0 auto;
       }
@@ -3009,11 +4134,46 @@
         border: 1px solid rgba(64, 43, 19, 0.7);
       }
 
-      #${PANEL_ID} .tm-ok { color: #9be28f; }
-      #${PANEL_ID} .tm-low { color: #ff9d9d; }
-      #${PANEL_ID} .tm-mid { color: #9ad9ff; }
-      #${PANEL_ID} .tm-high { color: #ffd889; }
-      #${PANEL_ID} .tm-neutral { color: #d8d8d8; }
+      #${PANEL_ID} .tm-ok { color: #2c5a36; }
+      #${PANEL_ID} .tm-low { color: #6f2626; }
+      #${PANEL_ID} .tm-mid { color: #2a5677; }
+      #${PANEL_ID} .tm-high { color: #6a4c19; }
+      #${PANEL_ID} .tm-neutral { color: #4c4c4c; }
+
+      #${PANEL_ID} .tm-plan-table td.tm-ok,
+      #${PANEL_ID} .tm-plan-table td.tm-low,
+      #${PANEL_ID} .tm-plan-table td.tm-mid,
+      #${PANEL_ID} .tm-plan-table td.tm-high,
+      #${PANEL_ID} .tm-plan-table td.tm-neutral {
+        font-weight: 700;
+        text-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+        background-image: none !important;
+      }
+
+      #${PANEL_ID} .tm-plan-table td.tm-ok {
+        color: #f3fff5 !important;
+        background: linear-gradient(180deg, rgba(66, 112, 76, 0.92) 0%, rgba(44, 84, 54, 0.92) 100%) !important;
+      }
+
+      #${PANEL_ID} .tm-plan-table td.tm-low {
+        color: #fff5f5 !important;
+        background: linear-gradient(180deg, rgba(138, 69, 69, 0.92) 0%, rgba(92, 40, 40, 0.92) 100%) !important;
+      }
+
+      #${PANEL_ID} .tm-plan-table td.tm-mid {
+        color: #f3f9ff !important;
+        background: linear-gradient(180deg, rgba(66, 108, 139, 0.92) 0%, rgba(42, 73, 101, 0.92) 100%) !important;
+      }
+
+      #${PANEL_ID} .tm-plan-table td.tm-high {
+        color: #fff8ee !important;
+        background: linear-gradient(180deg, rgba(146, 111, 66, 0.92) 0%, rgba(98, 70, 35, 0.92) 100%) !important;
+      }
+
+      #${PANEL_ID} .tm-plan-table td.tm-neutral {
+        color: #f6f6f6 !important;
+        background: linear-gradient(180deg, rgba(98, 98, 98, 0.92) 0%, rgba(70, 70, 70, 0.92) 100%) !important;
+      }
 
       #${PANEL_ID}.tm-collapsed {
         min-height: 44px;
@@ -3036,6 +4196,7 @@
           left: 8px;
           right: 8px;
           top: 8px;
+          min-width: 0;
           width: auto;
           max-width: none;
           max-height: calc(100vh - 16px);
@@ -3045,6 +4206,24 @@
         #${PANEL_ID} .tm-building-icon {
           width: 32px;
           height: 32px;
+        }
+
+        #${PANEL_ID} .tm-queue-slot {
+          width: 44px;
+          height: 44px;
+          flex-basis: 44px;
+        }
+
+        #${PANEL_ID} .tm-queue-slot img {
+          top: 7px;
+          width: 44px;
+          height: 32px;
+        }
+
+        #${PANEL_ID} .tm-queue-points,
+        #${PANEL_ID} .tm-queue-timer,
+        #${PANEL_ID} .tm-queue-level {
+          font-size: 9px;
         }
 
         #${PANEL_ID} .tm-actions {
@@ -3101,9 +4280,21 @@
       return;
     }
 
+    const town = getTown();
+    const townIdentifier = getTownIdentifier(town);
+    const syncScope = `${getSelectedWorldMode()}|${townIdentifier}`;
+    if (syncScope !== lastPresetSyncScope) {
+      lastPresetSyncScope = syncScope;
+      const assignedPreset = getAssignedPresetForTown(town);
+      if (assignedPreset && getSelectedPreset() !== assignedPreset) {
+        setSelectedPreset(assignedPreset);
+      }
+    }
+
     const presetKey = getSelectedPreset();
     const preset = getPresetConfig(presetKey);
-    const town = getTown();
+    const assignedPresetKey = getAssignedPresetForTown(town);
+    const assignedPresetConfig = assignedPresetKey ? getPresetConfig(assignedPresetKey) : null;
     const levels = extractBuildingLevels(town);
     const buildingOrders = getTownBuildingOrders(town, levels);
     const economy = extractTownEconomy(town, levels);
@@ -3113,9 +4304,11 @@
     const queueDurationSeconds = Math.max(0, Number(projectedState.queueDurationSeconds) || 0);
     const rowsEl = panel.querySelector(".tm-rows");
     const townNameEl = panel.querySelector(".tm-town-name");
+    const townPresetEl = panel.querySelector(".tm-town-preset");
     const nextActionEl = panel.querySelector(".tm-next-action");
     const specialEl = panel.querySelector(".tm-special-building");
     const planPreviewEl = panel.querySelector(".tm-plan-preview");
+    const queueListEl = panel.querySelector(".tm-queue-list");
     const colPrioEl = panel.querySelector(".tm-col-prio");
     const colBuildingEl = panel.querySelector(".tm-col-building");
     const colStateEl = panel.querySelector(".tm-col-state");
@@ -3126,12 +4319,112 @@
     const currentWorldMode = getSelectedWorldMode();
     if (worldSelect && worldSelect.value !== currentWorldMode) {
       worldSelect.value = currentWorldMode;
-      populatePresetSelect(select);
+      populatePresetSelect(select, town);
     }
     if (select && select.value !== presetKey) {
       select.value = presetKey;
     }
     updateActions(panel, preset);
+    applyNativePlanTableSkin(panel);
+    syncDioTownIconWithAssignedPreset(town, assignedPresetKey, assignedPresetConfig);
+
+    if (queueListEl) {
+      queueListEl.innerHTML = "";
+      queueListEl.classList.toggle("tm-open", isQueueDetailsVisible);
+      queueListEl.classList.remove("tm-queue-native");
+      if (isQueueDetailsVisible) {
+        const nativeQueueRoot = findNativeBuildingQueueVisualRoot();
+        if (nativeQueueRoot) {
+          const clonedQueueRoot = sanitizeNativeQueueClone(nativeQueueRoot.cloneNode(true));
+          queueListEl.appendChild(clonedQueueRoot);
+          queueListEl.classList.add("tm-queue-native");
+        } else {
+          const slotCount = 7;
+          const strip = document.createElement("div");
+          strip.className = "tm-queue-strip construction_queue_order_container";
+          const pointsCache = new Map();
+          const costCache = new Map();
+
+          for (let index = 0; index < slotCount; index += 1) {
+            const order = buildingOrders[index] || null;
+            const slot = document.createElement("div");
+            slot.className = "tm-queue-slot js-queue-item js-tutorial-queue-item construction_queue_sprite";
+
+            if (!order) {
+              slot.classList.add("tm-empty", "empty_slot");
+              strip.appendChild(slot);
+              continue;
+            }
+
+            slot.classList.add("tm-filled");
+
+            const isDowngradeOrder = order.action === "downgrade";
+            const parsedTargetLevel = toInt(order.targetLevel, isDowngradeOrder ? 0 : 1);
+            const toLevel = isDowngradeOrder ? Math.max(0, parsedTargetLevel) : Math.max(1, parsedTargetLevel);
+            const fromLevel = isDowngradeOrder ? toLevel + 1 : Math.max(0, toLevel - 1);
+            const buildingName = BUILDING_LABELS[order.key] || order.key;
+            const queueIconCandidates = getQueueIconCandidates(order.key);
+            const remaining = Number.isFinite(order.remainingSeconds)
+              ? Math.max(0, Number(order.remainingSeconds))
+              : null;
+            const points = isDowngradeOrder
+              ? null
+              : estimateUpgradePoints(order.key, toLevel, pointsCache, costCache);
+
+            if (points !== null && points > 0) {
+              const pointsBadge = document.createElement("div");
+              pointsBadge.className = "tm-queue-points building_points js-building-points";
+              pointsBadge.textContent = `+${points}p`;
+              slot.appendChild(pointsBadge);
+            }
+
+            if (index === 0 && remaining !== null) {
+              const timerBadge = document.createElement("div");
+              timerBadge.className = "tm-queue-timer js-order-countdown order_countdown countdown";
+              timerBadge.textContent = formatClockDuration(remaining);
+              slot.appendChild(timerBadge);
+            }
+
+            if (queueIconCandidates.length) {
+              const icon = document.createElement("img");
+              icon.className = "building_icon";
+              icon.alt = "";
+              icon.loading = "lazy";
+              icon.decoding = "async";
+              let iconIndex = 0;
+              const setNextIcon = () => {
+                if (iconIndex >= queueIconCandidates.length) {
+                  icon.style.display = "none";
+                  return;
+                }
+                icon.src = queueIconCandidates[iconIndex];
+                iconIndex += 1;
+              };
+              icon.addEventListener("error", setNextIcon);
+              setNextIcon();
+              slot.appendChild(icon);
+            }
+
+            const levelBadge = document.createElement("div");
+            levelBadge.className = "tm-queue-level build_lvl js-level";
+            levelBadge.textContent = `${isDowngradeOrder ? "-" : "+"}${toLevel}`;
+            slot.appendChild(levelBadge);
+
+            const queueLabel = isDowngradeOrder ? "deconstruction" : "construction";
+            slot.title = `${buildingName} ${fromLevel}->${toLevel} (${queueLabel})${remaining !== null ? ` | reste ${formatDuration(remaining)}` : ""}`;
+            strip.appendChild(slot);
+          }
+
+          queueListEl.appendChild(strip);
+          if (buildingOrders.length > slotCount) {
+            const overflow = document.createElement("div");
+            overflow.className = "tm-queue-overflow";
+            overflow.textContent = `+${buildingOrders.length - slotCount}`;
+            queueListEl.appendChild(overflow);
+          }
+        }
+      }
+    }
 
     if (!preset || !rowsEl || !townNameEl || !nextActionEl || !specialEl || !planPreviewEl) {
       return;
@@ -3151,14 +4444,16 @@
     const townName = getTownName(town);
     const signature = JSON.stringify({
       town: townName,
+      townId: townIdentifier,
       mode: currentWorldMode,
       preset: preset.key,
       edit: isCustomEditMode,
+      fullTable: isFullTableVisible,
       order: preset.priorityOrder,
       special: preset.specialBuilding,
       values: Object.keys(preset.targets).map((key) => getLevelForBuilding(projectedLevels, key)),
       targets: preset.targets,
-      queue: buildingOrders.map((order) => [order.key, order.targetLevel, Math.round(order.remainingSeconds || -1)]),
+      queue: buildingOrders.map((order) => [order.key, order.targetLevel, order.action || "upgrade", Math.round(order.remainingSeconds || -1)]),
       queueDuration: Math.round(queueDurationSeconds),
       resources: projectedEconomy
         ? [
@@ -3178,6 +4473,13 @@
     lastSignature = signature;
 
     townNameEl.textContent = townName;
+    if (townPresetEl) {
+      if (assignedPresetKey && assignedPresetConfig) {
+        townPresetEl.textContent = `Type sauvegarde: ${assignedPresetConfig.label}`;
+      } else {
+        townPresetEl.textContent = "Type sauvegarde: aucun";
+      }
+    }
     rowsEl.innerHTML = "";
 
     const plan = getPriorityPlan(preset, projectedLevels, projectedEconomy);
@@ -3195,42 +4497,62 @@
     });
 
     const first = plan.length ? plan[0] : null;
-    const topPlan = plan.slice(0, 10);
+    const previewPlan = plan.slice(0, 10);
+    const displayedPlan = isFullTableVisible ? plan : plan.slice(0, COMPACT_TABLE_ROW_COUNT);
     const currentOrder = buildingOrders.length ? buildingOrders[0] : null;
     const queueContext = buildingOrders.length > 1
       ? ` File: ${buildingOrders.length} ordres (${formatDuration(queueDurationSeconds)}).`
       : "";
     if (currentOrder) {
       const currentName = BUILDING_LABELS[currentOrder.key] || currentOrder.key;
-      const currentFrom = Math.max(0, currentOrder.targetLevel - 1);
+      const currentIsDowngrade = currentOrder.action === "downgrade";
+      const currentFrom = currentIsDowngrade
+        ? Math.max(0, currentOrder.targetLevel + 1)
+        : Math.max(0, currentOrder.targetLevel - 1);
       const currentRemaining = Number.isFinite(currentOrder.remainingSeconds)
         ? ` (reste ${formatDuration(currentOrder.remainingSeconds)})`
         : "";
       if (first) {
         const firstName = BUILDING_LABELS[first.key] || first.key;
         const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}.${queueContext} Apres file: ${firstName} -> niv ${firstTarget}.`;
+        const firstFrom = Math.max(0, toInt(first.level, 0));
+        const firstIsDowngrade = first.kind === "required_downgrade" || first.action === "downgrade" || firstTarget < firstFrom;
+        const firstActionText = firstIsDowngrade
+          ? `${firstName} ${firstFrom}->${firstTarget} (deconstruction)`
+          : `${firstName} -> niv ${firstTarget}`;
+        const currentLabel = currentIsDowngrade ? "deconstruction" : "construction";
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel} (${currentLabel})${currentRemaining}.${queueContext} Apres file: ${firstActionText}.`;
       } else {
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel}${currentRemaining}.${queueContext} Ensuite: template atteint.`;
+        const currentLabel = currentIsDowngrade ? "deconstruction" : "construction";
+        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel} (${currentLabel})${currentRemaining}.${queueContext} Ensuite: template atteint.`;
       }
     } else if (first) {
       const firstName = BUILDING_LABELS[first.key] || first.key;
       const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
-      const firstTag = first.kind === "required" ? "obligatoire" : "optimisation";
-      if (hasSimulation) {
-        const waitText = first.waitSeconds > 0 ? `attente ${formatDuration(first.waitSeconds)}` : "demarrage immediat";
-        const buildText = first.buildSeconds > 0 ? `chantier ${formatDuration(first.buildSeconds)}` : "chantier court";
-        nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | ${waitText}, ${buildText}`;
+      const firstFrom = Math.max(0, toInt(first.level, 0));
+      const firstIsDowngrade = first.kind === "required_downgrade" || first.action === "downgrade" || firstTarget < firstFrom;
+      if (firstIsDowngrade) {
+        nextActionEl.textContent = `A lancer maintenant: deconstruire ${firstName} ${firstFrom}->${firstTarget} (obligatoire).`;
       } else {
-        nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | mode simplifie`;
+        const firstTag = first.kind === "required" ? "obligatoire" : "optimisation";
+        if (hasSimulation) {
+          const waitText = first.waitSeconds > 0 ? `attente ${formatDuration(first.waitSeconds)}` : "demarrage immediat";
+          const buildText = first.buildSeconds > 0 ? `chantier ${formatDuration(first.buildSeconds)}` : "chantier court";
+          nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | ${waitText}, ${buildText}`;
+        } else {
+          nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | mode simplifie`;
+        }
       }
     } else {
       nextActionEl.textContent = "Aucune action batiment: template atteint.";
     }
 
-    planPreviewEl.textContent = topPlan.length
-      ? `Top ${topPlan.length} prochaines constructions optimisees${queueDurationSeconds > 0 ? ` (file: ${formatDuration(queueDurationSeconds)})` : ""}.`
-      : "Aucune construction restante pour ce preset.";
+    const displayHint = plan.length > COMPACT_TABLE_ROW_COUNT
+      ? ` Affichage ${displayedPlan.length}/${plan.length}.`
+      : "";
+    planPreviewEl.textContent = previewPlan.length
+      ? `Top ${previewPlan.length} prochaines actions optimisees${queueDurationSeconds > 0 ? ` (file: ${formatDuration(queueDurationSeconds)})` : ""}.${displayHint}`
+      : "Aucune action restante pour ce preset.";
 
     const special = preset.specialBuilding || inferSpecialBuilding(preset.targets);
     if (special && special.key) {
@@ -3276,26 +4598,39 @@
       if (colPrioEl) colPrioEl.textContent = "Etape";
       if (colBuildingEl) colBuildingEl.textContent = "Batiment";
       if (colStateEl) colStateEl.textContent = "Action";
-      if (colTargetEl) colTargetEl.textContent = "Timing";
+      if (colTargetEl) {
+        colTargetEl.textContent = "Timing";
+        colTargetEl.title = TIMING_COLUMN_TOOLTIP;
+        colTargetEl.classList.add("tm-has-tooltip");
+      }
 
       rowsEl.innerHTML = "";
-      if (!topPlan.length) {
-        rowsEl.innerHTML = `<tr><td colspan="4" class="tm-neutral">Template atteint: aucune construction supplementaire.</td></tr>`;
+      if (!displayedPlan.length) {
+        rowsEl.innerHTML = `<tr><td colspan="4" class="tm-neutral">Template atteint: aucune action supplementaire.</td></tr>`;
         return;
       }
 
-      topPlan.forEach((step, index) => {
+      displayedPlan.forEach((step, index) => {
         const row = document.createElement("tr");
         const buildingName = BUILDING_LABELS[step.key] || step.key;
         const iconUrl = getIconUrl(step.key);
         const fromLevel = toInt(step.level, 0);
         const toLevel = toInt(step.targetLevel, fromLevel + 1);
-        const tag = step.kind === "required" ? "obligatoire" : "optimisation";
-        const stateClass = step.kind === "required" ? "tm-low" : "tm-mid";
+        const isDowngradeStep = step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel;
+        const tag = isDowngradeStep
+          ? "deconstruction"
+          : (step.kind === "required" ? "obligatoire" : "optimisation");
+        const stateClass = isDowngradeStep
+          ? "tm-high"
+          : (step.kind === "required" ? "tm-low" : "tm-mid");
         const waitSeconds = Math.max(0, Number(step.waitSeconds) || 0);
         const buildSeconds = Math.max(0, Number(step.buildSeconds) || 0);
         const finishSeconds = Math.max(0, Number(step.finishSeconds) || waitSeconds + buildSeconds);
-        const timing = `att ${formatDuration(waitSeconds)} | build ${formatDuration(buildSeconds)} | ETA ${formatDuration(finishSeconds)}`;
+        const finishFromNowSeconds = finishSeconds + queueDurationSeconds;
+        const launchFromNowSeconds = Math.max(0, finishFromNowSeconds - buildSeconds);
+        const timing = isDowngradeStep
+          ? `Deconstruction immediate | Attente ${formatDuration(launchFromNowSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`
+          : `Attente ${formatDuration(launchFromNowSeconds)} | Construction ${formatDuration(buildSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`;
 
         const prioCell = document.createElement("td");
         prioCell.className = "tm-prio-cell";
@@ -3340,7 +4675,11 @@
     if (colPrioEl) colPrioEl.textContent = "Prio";
     if (colBuildingEl) colBuildingEl.textContent = "Batiment";
     if (colStateEl) colStateEl.textContent = "Etat";
-    if (colTargetEl) colTargetEl.textContent = "Cible";
+    if (colTargetEl) {
+      colTargetEl.textContent = "Cible";
+      colTargetEl.removeAttribute("title");
+      colTargetEl.classList.remove("tm-has-tooltip");
+    }
 
     targetEntries.forEach(([buildingKey, range]) => {
       const level = getLevelForBuilding(projectedLevels, buildingKey);
