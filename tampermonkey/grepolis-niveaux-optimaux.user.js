@@ -2014,6 +2014,210 @@
     return `name:${getTownName(town)}`;
   }
 
+  function getTownCurrentPoints(town) {
+    if (!town) {
+      return null;
+    }
+
+    let pointsFromGetter = null;
+    try {
+      if (typeof town.getPoints === "function") {
+        pointsFromGetter = town.getPoints();
+      }
+    } catch (_) {}
+
+    let pointsFromModel = null;
+    try {
+      if (town.town_model && typeof town.town_model.get === "function") {
+        pointsFromModel = town.town_model.get("points");
+      }
+    } catch (_) {}
+
+    const points = pickFirstFiniteNumber(
+      pointsFromGetter,
+      town && town.points,
+      town && town.attributes && town.attributes.points,
+      town && town.attributes && town.attributes.town_points,
+      town && town.town_model && town.town_model.attributes && town.town_model.attributes.points,
+      pointsFromModel
+    );
+
+    if (points === null || !Number.isFinite(points) || points < 0) {
+      return null;
+    }
+    return Math.max(0, Math.round(points));
+  }
+
+  function estimateTownPointsFromLevels(levels, pointsCache, costCache) {
+    if (!levels || typeof levels !== "object") {
+      return null;
+    }
+
+    let total = 0;
+    let hasPointData = false;
+    const seen = new Set();
+
+    KNOWN_BUILDING_KEYS.forEach((buildingKey) => {
+      const canonicalKey = normalizeBuildingKey(buildingKey);
+      if (!canonicalKey || seen.has(canonicalKey)) {
+        return;
+      }
+      seen.add(canonicalKey);
+
+      const currentLevel = Math.max(0, getLevelForBuilding(levels, canonicalKey));
+      for (let level = 1; level <= currentLevel; level += 1) {
+        const points = estimateUpgradePoints(canonicalKey, level, pointsCache, costCache);
+        if (points !== null && Number.isFinite(points) && points > 0) {
+          total += points;
+          hasPointData = true;
+        }
+      }
+    });
+
+    if (!hasPointData) {
+      return null;
+    }
+    return Math.max(0, Math.round(total));
+  }
+
+  function projectTownPointsAfterQueue(town, levels, buildingOrders) {
+    if (!levels || !Array.isArray(buildingOrders)) {
+      return null;
+    }
+
+    const pointsCache = new Map();
+    const costCache = new Map();
+    let currentPoints = getTownCurrentPoints(town);
+    let usesEstimatedBase = false;
+
+    if (currentPoints === null) {
+      currentPoints = estimateTownPointsFromLevels(levels, pointsCache, costCache);
+      usesEstimatedBase = currentPoints !== null;
+    }
+    if (currentPoints === null) {
+      return null;
+    }
+
+    const simulatedLevels = { ...levels };
+    let deltaPoints = 0;
+    let unknownPointSteps = 0;
+
+    buildingOrders.forEach((order) => {
+      if (!order || !order.key) {
+        return;
+      }
+
+      const key = normalizeBuildingKey(order.key);
+      if (!KNOWN_BUILDING_KEYS.includes(key)) {
+        return;
+      }
+
+      const action = order.action === "downgrade" ? "downgrade" : "upgrade";
+      const currentLevel = Math.max(0, getLevelForBuilding(simulatedLevels, key));
+      const rawTargetLevel = toInt(
+        order.targetLevel,
+        action === "downgrade" ? Math.max(0, currentLevel - 1) : (currentLevel + 1)
+      );
+
+      if (action === "downgrade") {
+        const fromLevel = Math.max(0, currentLevel);
+        const toLevel = Math.max(0, Math.min(rawTargetLevel, Math.max(0, fromLevel - 1)));
+        for (let level = fromLevel; level > toLevel; level -= 1) {
+          const points = estimateUpgradePoints(key, level, pointsCache, costCache);
+          if (points !== null && Number.isFinite(points) && points > 0) {
+            deltaPoints -= points;
+          } else {
+            unknownPointSteps += 1;
+          }
+        }
+        simulatedLevels[key] = toLevel;
+      } else {
+        const toLevel = Math.max(currentLevel + 1, rawTargetLevel);
+        for (let level = currentLevel + 1; level <= toLevel; level += 1) {
+          const points = estimateUpgradePoints(key, level, pointsCache, costCache);
+          if (points !== null && Number.isFinite(points) && points > 0) {
+            deltaPoints += points;
+          } else {
+            unknownPointSteps += 1;
+          }
+        }
+        simulatedLevels[key] = toLevel;
+      }
+
+      if (key === "dock") {
+        simulatedLevels.docks = simulatedLevels[key];
+      }
+    });
+
+    const roundedCurrent = Math.max(0, Math.round(currentPoints));
+    const roundedDelta = Math.round(deltaPoints);
+    const roundedFinal = Math.max(0, roundedCurrent + roundedDelta);
+    return {
+      currentPoints: roundedCurrent,
+      deltaPoints: roundedDelta,
+      finalPoints: roundedFinal,
+      usesEstimatedBase,
+      unknownPointSteps
+    };
+  }
+
+  function projectTownPointsToPresetTarget(town, levels, buildingOrders, preset) {
+    const queueProjection = projectTownPointsAfterQueue(town, levels, buildingOrders);
+    if (!queueProjection || !preset || !preset.targets || typeof preset.targets !== "object") {
+      return null;
+    }
+
+    const projectedLevels = applyBuildingOrdersToLevels(levels, buildingOrders || []);
+    const pointsCache = new Map();
+    const costCache = new Map();
+    let deltaFromQueueToOptimized = 0;
+    let unknownOptimizedSteps = 0;
+
+    Object.entries(preset.targets).forEach(([buildingKey, range]) => {
+      const normalized = normalizeRange(range);
+      if (!normalized) {
+        return;
+      }
+      const maxTarget = normalized[1];
+      const key = normalizeBuildingKey(buildingKey);
+      const currentLevel = Math.max(0, getLevelForBuilding(projectedLevels, key));
+
+      if (currentLevel < maxTarget) {
+        for (let level = currentLevel + 1; level <= maxTarget; level += 1) {
+          const points = estimateUpgradePoints(key, level, pointsCache, costCache);
+          if (points !== null && Number.isFinite(points) && points > 0) {
+            deltaFromQueueToOptimized += points;
+          } else {
+            unknownOptimizedSteps += 1;
+          }
+        }
+      } else if (currentLevel > maxTarget) {
+        for (let level = currentLevel; level > maxTarget; level -= 1) {
+          const points = estimateUpgradePoints(key, level, pointsCache, costCache);
+          if (points !== null && Number.isFinite(points) && points > 0) {
+            deltaFromQueueToOptimized -= points;
+          } else {
+            unknownOptimizedSteps += 1;
+          }
+        }
+      }
+    });
+
+    const optimizedPoints = Math.max(0, Math.round(queueProjection.finalPoints + deltaFromQueueToOptimized));
+    const completionRatio = optimizedPoints > 0
+      ? Math.max(0, queueProjection.currentPoints / optimizedPoints)
+      : 1;
+
+    return {
+      ...queueProjection,
+      optimizedPoints,
+      deltaFromQueueToOptimized: Math.round(deltaFromQueueToOptimized),
+      deltaFromCurrentToOptimized: Math.round(optimizedPoints - queueProjection.currentPoints),
+      completionRatio,
+      unknownOptimizedSteps
+    };
+  }
+
   function readNumericValue(value) {
     if (typeof value === "number" && Number.isFinite(value)) {
       return value;
@@ -3011,6 +3215,27 @@
     return `${secs}s`;
   }
 
+  function formatPointsValue(points) {
+    if (!Number.isFinite(points)) {
+      return "-";
+    }
+    return Math.round(points).toLocaleString("fr-FR");
+  }
+
+  function formatSignedPoints(points) {
+    if (!Number.isFinite(points)) {
+      return "-";
+    }
+    const rounded = Math.round(points);
+    if (rounded > 0) {
+      return `+${formatPointsValue(rounded)}`;
+    }
+    if (rounded < 0) {
+      return `-${formatPointsValue(Math.abs(rounded))}`;
+    }
+    return "0";
+  }
+
   function formatClockDuration(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) {
       return "--:--:--";
@@ -3055,6 +3280,39 @@
     }
 
     return { cls: "tm-ok", text: `Niv ${level} | ok` };
+  }
+
+  function clampNumber(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function getPlanTableColumnWidths(steps) {
+    const list = Array.isArray(steps) ? steps : [];
+    let maxBuildingChars = 8;
+    let maxActionChars = 14;
+
+    list.forEach((step) => {
+      if (!step) {
+        return;
+      }
+      const buildingName = BUILDING_LABELS[step.key] || String(step.key || "");
+      maxBuildingChars = Math.max(maxBuildingChars, buildingName.length);
+
+      const fromLevel = Math.max(0, toInt(step.level, 0));
+      const toLevel = Math.max(0, toInt(step.targetLevel, fromLevel + 1));
+      const isDowngrade = step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel;
+      const tag = isDowngrade
+        ? "deconstruction"
+        : (step.kind === "required" ? "obligatoire" : "optimisation");
+      const actionText = `Niv ${fromLevel} -> ${toLevel} (${tag})`;
+      maxActionChars = Math.max(maxActionChars, actionText.length);
+    });
+
+    return {
+      prio: 52,
+      building: clampNumber(Math.round(48 + maxBuildingChars * 6.5), 108, 168),
+      state: clampNumber(Math.round(44 + maxActionChars * 5.15), 132, 212)
+    };
   }
 
   function normalizePanelLayout(raw) {
@@ -3331,6 +3589,7 @@
           </div>
           <div class="tm-town-name">Ville active</div>
           <div class="tm-town-preset">Type sauvegarde: -</div>
+          <div class="tm-town-points">Points ville: -</div>
           <div class="tm-next-action"></div>
           <div class="tm-special-building"></div>
           <div class="tm-plan-preview"></div>
@@ -3653,6 +3912,7 @@
       #${PANEL_ID} .tm-controls,
       #${PANEL_ID} .tm-town-name,
       #${PANEL_ID} .tm-town-preset,
+      #${PANEL_ID} .tm-town-points,
       #${PANEL_ID} .tm-next-action,
       #${PANEL_ID} .tm-special-building,
       #${PANEL_ID} .tm-plan-preview,
@@ -3766,6 +4026,12 @@
       }
 
       #${PANEL_ID} .tm-town-preset {
+        color: #6a4218;
+        border-top: 1px solid rgba(119, 78, 34, 0.25);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-town-points {
         color: #6a4218;
         border-top: 1px solid rgba(119, 78, 34, 0.25);
         font-weight: 700;
@@ -3953,7 +4219,7 @@
         width: 100%;
         min-width: 0;
         border-collapse: collapse;
-        table-layout: auto;
+        table-layout: fixed;
         background:
           linear-gradient(180deg, rgba(112, 76, 34, 0.82) 0%, rgba(68, 44, 20, 0.82) 100%),
           url("${ASSETS.ui.panelOverlay}");
@@ -3969,20 +4235,23 @@
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-prio {
-        width: 1%;
-        min-width: 0;
+        width: var(--tm-col-prio-width, 58px);
+        min-width: var(--tm-col-prio-width, 58px);
+        max-width: var(--tm-col-prio-width, 58px);
         text-align: center;
         white-space: nowrap;
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-building {
-        width: auto;
-        min-width: 0;
+        width: var(--tm-col-building-width, 152px);
+        min-width: var(--tm-col-building-width, 152px);
+        max-width: var(--tm-col-building-width, 152px);
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-state {
-        width: auto;
-        min-width: 0;
+        width: var(--tm-col-state-width, 182px);
+        min-width: var(--tm-col-state-width, 182px);
+        max-width: var(--tm-col-state-width, 182px);
       }
 
       #${PANEL_ID} .tm-plan-table .tm-col-target {
@@ -3998,7 +4267,7 @@
         border-bottom: 1px solid rgb(208, 190, 151);
         padding: 5px 7px;
         text-align: left;
-        vertical-align: top;
+        vertical-align: middle;
         overflow-wrap: anywhere;
         word-break: break-word;
       }
@@ -4073,14 +4342,36 @@
       }
 
       #${PANEL_ID} .tm-plan-table td:nth-child(1) {
+        width: var(--tm-col-prio-width, 58px);
+        min-width: var(--tm-col-prio-width, 58px);
+        max-width: var(--tm-col-prio-width, 58px);
         text-align: center;
         white-space: nowrap;
       }
 
+      #${PANEL_ID} .tm-plan-table th:nth-child(2),
+      #${PANEL_ID} .tm-plan-table th:nth-child(3),
       #${PANEL_ID} .tm-plan-table td:nth-child(2),
-      #${PANEL_ID} .tm-plan-table td:nth-child(3),
+      #${PANEL_ID} .tm-plan-table td:nth-child(3) {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        overflow-wrap: normal;
+        word-break: normal;
+      }
+
       #${PANEL_ID} .tm-plan-table td:nth-child(4) {
-        white-space: normal;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        overflow-wrap: normal;
+        word-break: normal;
+      }
+
+      #${PANEL_ID} .tm-plan-table th:nth-child(4) {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       #${PANEL_ID} .tm-building-cell {
@@ -4091,7 +4382,11 @@
 
       #${PANEL_ID} .tm-building-cell span {
         min-width: 0;
-        overflow-wrap: anywhere;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        overflow-wrap: normal;
+        word-break: normal;
       }
 
       #${PANEL_ID} .tm-prio-cell {
@@ -4255,6 +4550,7 @@
       constrainPanelToViewport(panel);
 
       const rowsEl = panel.querySelector(".tm-rows");
+      const townPointsEl = panel.querySelector(".tm-town-points");
       const nextActionEl = panel.querySelector(".tm-next-action");
       const specialEl = panel.querySelector(".tm-special-building");
       const planPreviewEl = panel.querySelector(".tm-plan-preview");
@@ -4264,6 +4560,9 @@
       }
       if (nextActionEl) {
         nextActionEl.textContent = "Le panneau est visible mais le rendu a echoue temporairement.";
+      }
+      if (townPointsEl) {
+        townPointsEl.textContent = "Points ville: indisponibles (fallback).";
       }
       if (specialEl) {
         specialEl.textContent = "Batiment special: indisponible (fallback).";
@@ -4302,9 +4601,13 @@
     const projectedLevels = projectedState.levels || applyBuildingOrdersToLevels(levels, buildingOrders);
     const projectedEconomy = projectedState.economy || economy;
     const queueDurationSeconds = Math.max(0, Number(projectedState.queueDurationSeconds) || 0);
+    const pointsProjection = levels
+      ? projectTownPointsToPresetTarget(town, levels, buildingOrders, preset)
+      : null;
     const rowsEl = panel.querySelector(".tm-rows");
     const townNameEl = panel.querySelector(".tm-town-name");
     const townPresetEl = panel.querySelector(".tm-town-preset");
+    const townPointsEl = panel.querySelector(".tm-town-points");
     const nextActionEl = panel.querySelector(".tm-next-action");
     const specialEl = panel.querySelector(".tm-special-building");
     const planPreviewEl = panel.querySelector(".tm-plan-preview");
@@ -4434,6 +4737,9 @@
       panel.classList.remove("tm-editing-targets");
       rowsEl.innerHTML = `<tr><td colspan="4" class="tm-neutral">Impossible de lire les batiments. Ouvre une ville et attends 1-2 secondes.</td></tr>`;
       planPreviewEl.textContent = "Top 10 des prochaines constructions: en attente des donnees de ville.";
+      if (townPointsEl) {
+        townPointsEl.textContent = "Points ville: en attente des donnees.";
+      }
       return;
     }
 
@@ -4455,6 +4761,16 @@
       targets: preset.targets,
       queue: buildingOrders.map((order) => [order.key, order.targetLevel, order.action || "upgrade", Math.round(order.remainingSeconds || -1)]),
       queueDuration: Math.round(queueDurationSeconds),
+      queuePoints: pointsProjection
+        ? [
+            pointsProjection.currentPoints,
+            pointsProjection.deltaPoints,
+            pointsProjection.finalPoints,
+            pointsProjection.optimizedPoints,
+            pointsProjection.unknownPointSteps,
+            pointsProjection.unknownOptimizedSteps
+          ]
+        : null,
       resources: projectedEconomy
         ? [
             Math.floor(projectedEconomy.resources.wood || 0),
@@ -4480,6 +4796,20 @@
         townPresetEl.textContent = "Type sauvegarde: aucun";
       }
     }
+    if (townPointsEl) {
+      if (!pointsProjection) {
+        townPointsEl.textContent = "Points ville: indisponibles.";
+      } else {
+        const ratioPercent = Math.round((pointsProjection.completionRatio || 0) * 1000) / 10;
+        const queueDeltaText = formatSignedPoints(pointsProjection.deltaPoints);
+        const targetDeltaText = formatSignedPoints(pointsProjection.deltaFromCurrentToOptimized);
+        const baseFlag = pointsProjection.usesEstimatedBase ? " | base estimee" : "";
+        const partialFlag = (pointsProjection.unknownPointSteps > 0 || pointsProjection.unknownOptimizedSteps > 0)
+          ? " | calcul partiel"
+          : "";
+        townPointsEl.textContent = `Points ville: ${formatPointsValue(pointsProjection.currentPoints)} -> ${formatPointsValue(pointsProjection.finalPoints)} (${queueDeltaText} file) -> ${formatPointsValue(pointsProjection.optimizedPoints)} (${targetDeltaText} cible, ${ratioPercent}%)${baseFlag}${partialFlag}`;
+      }
+    }
     rowsEl.innerHTML = "";
 
     const plan = getPriorityPlan(preset, projectedLevels, projectedEconomy);
@@ -4499,6 +4829,10 @@
     const first = plan.length ? plan[0] : null;
     const previewPlan = plan.slice(0, 10);
     const displayedPlan = isFullTableVisible ? plan : plan.slice(0, COMPACT_TABLE_ROW_COUNT);
+    const columnWidths = getPlanTableColumnWidths(displayedPlan);
+    panel.style.setProperty("--tm-col-prio-width", `${columnWidths.prio}px`);
+    panel.style.setProperty("--tm-col-building-width", `${columnWidths.building}px`);
+    panel.style.setProperty("--tm-col-state-width", `${columnWidths.state}px`);
     const currentOrder = buildingOrders.length ? buildingOrders[0] : null;
     const queueContext = buildingOrders.length > 1
       ? ` File: ${buildingOrders.length} ordres (${formatDuration(queueDurationSeconds)}).`
