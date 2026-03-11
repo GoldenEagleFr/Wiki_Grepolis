@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grepolis - Niveaux optimaux de batiments
 // @namespace    https://github.com/GoldenEagleFr/Wiki_Grepolis
-// @version      1.5.9
+// @version      1.5.11
 // @description  Niveaux optimaux avec simulation cout/temps, mode monde (Revolte/Conquete), fenetre deplacable et redimensionnable.
 // @author       GoldenEagleFr
 // @match        https://*.grepolis.com/game/*
@@ -486,6 +486,7 @@
   const ACADEMY_HIGHLIGHT_TODO_CLASS = "tm-academy-research-todo";
   const ACADEMY_HIGHLIGHT_REMOVE_CLASS = "tm-academy-research-remove";
   const ACADEMY_HIGHLIGHT_DONE_CLASS = "tm-academy-research-done";
+  const ACADEMY_LEGEND_CLASS = "tm-academy-legend";
 
   let isCustomEditMode = false;
   let isQueueDetailsVisible = false;
@@ -811,6 +812,77 @@
     }
     return normalizeToken(unitName);
   }
+
+  function getGameUnitKeyCandidatesForUnitName(unitName) {
+    const logicalKey = resolveUnitPlanUnitKey(unitName);
+    switch (logicalKey) {
+      case "bireme":
+        return ["bireme"];
+      case "fire_ship":
+      case "fireboat":
+        return ["fire_ship", "attack_ship"];
+      case "fast_transport_ship":
+      case "fast_transporter":
+      case "small_transporter":
+        return ["small_transporter", "fast_transporter", "fast_transport_ship"];
+      case "catapult":
+        return ["catapult"];
+      case "archer":
+        return ["archer"];
+      case "hoplite":
+        return ["hoplite"];
+      case "colony_ship":
+      case "colonize_ship":
+        return ["colonize_ship", "colony_ship"];
+      case "rider":
+        return ["rider"];
+      case "slinger":
+        return ["slinger"];
+      case "sword":
+        return ["sword"];
+      case "chariot":
+        return ["chariot"];
+      default: {
+        const normalized = normalizeToken(logicalKey);
+        return normalized ? [normalized] : [];
+      }
+    }
+  }
+
+  const TRACKED_GAME_UNIT_KEYS = (() => {
+    const out = new Set([
+      "sword",
+      "slinger",
+      "archer",
+      "hoplite",
+      "rider",
+      "chariot",
+      "catapult",
+      "small_transporter",
+      "fast_transporter",
+      "fast_transport_ship",
+      "bireme",
+      "attack_ship",
+      "fire_ship",
+      "colonize_ship",
+      "colony_ship"
+    ]);
+    Object.values(UNIT_PLAN_CATALOG).forEach((plans) => {
+      (Array.isArray(plans) ? plans : []).forEach((plan) => {
+        if (!plan || !Array.isArray(plan.units)) {
+          return;
+        }
+        plan.units.forEach((unit) => {
+          getGameUnitKeyCandidatesForUnitName(unit && unit.name).forEach((unitKey) => {
+            if (unitKey) {
+              out.add(unitKey);
+            }
+          });
+        });
+      });
+    });
+    return Object.freeze(out);
+  })();
 
   function getResearchKeysForUnitKey(unitKey) {
     const normalized = normalizeToken(unitKey);
@@ -3075,22 +3147,100 @@
         if (!(node instanceof HTMLElement) || seen.has(node) || !isVisibleElement(node) || node.closest(`#${PANEL_ID}`)) {
           return;
         }
-        const researchNodes = node.querySelectorAll(
-          "[onclick*='research'], [onclick*='Research'], [data-research], [data-research-key], [data-research_key], [data-tech], [id*='research'], [class*='research_'], [class*='technology_']"
-        );
-        const hasResearchContent = researchNodes.length > 0 && Boolean(
+        const nodeClassName = typeof node.className === "string" ? node.className : "";
+        const markerText = normalizeSimpleText(`${node.id || ""} ${nodeClassName}`);
+        const hasAcademyMarker =
+          markerText.includes("academy") ||
+          markerText.includes("academie") ||
+          Boolean(
+            node.querySelector(
+              "#building_academy, [data-window-type='building_academy'], [class*='academy'], [class*='academie']"
+            )
+          );
+        const hasResearchSignals = Boolean(
           node.querySelector(
-            "[class*='academy'], #building_academy, [data-window-type='building_academy'], [class*='research'], [class*='technology']"
+            "[onclick*='research'], [onclick*='Research'], [data-research], [data-research-key], [data-research_key], [data-tech], [id*='research'], [class*='research'], [class*='technology'], [class*='tech_tree']"
           )
         );
-        if (!hasResearchContent) {
+        if (!hasAcademyMarker && !hasResearchSignals) {
           return;
         }
         seen.add(node);
         roots.push(node);
       });
     });
+
+    if (roots.length) {
+      return roots;
+    }
+
+    // Fallback for worlds/skins where Academy markup differs and lacks data-* hooks.
+    const fallbackSelectors = [
+      "#building_academy",
+      "[data-window-type='building_academy']",
+      "[id^='gpwnd_'] .window_content"
+    ];
+    fallbackSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (!(node instanceof HTMLElement) || seen.has(node) || !isVisibleElement(node) || node.closest(`#${PANEL_ID}`)) {
+          return;
+        }
+        const nodeClassName = typeof node.className === "string" ? node.className : "";
+        const markerText = normalizeSimpleText(`${node.id || ""} ${nodeClassName} ${(node.textContent || "").slice(0, 500)}`);
+        if (!/(academy|academie|research|recherche|technology|technologie|tech_tree)/.test(markerText)) {
+          return;
+        }
+        seen.add(node);
+        roots.push(node);
+      });
+    });
+
     return roots;
+  }
+
+  function ensureAcademyLegend(roots) {
+    if (!Array.isArray(roots) || !roots.length) {
+      return;
+    }
+
+    const hosts = [];
+    const seenHosts = new Set();
+    roots.forEach((root) => {
+      if (!(root instanceof HTMLElement)) {
+        return;
+      }
+      const windowRoot = root.closest("[id^='gpwnd_']");
+      const host = (windowRoot && windowRoot.querySelector(".window_content")) || root;
+      if (!(host instanceof HTMLElement) || seenHosts.has(host) || host.closest(`#${PANEL_ID}`)) {
+        return;
+      }
+      seenHosts.add(host);
+      hosts.push(host);
+    });
+
+    hosts.forEach((host) => {
+      let legend = host.querySelector(`.${ACADEMY_LEGEND_CLASS}`);
+      if (!(legend instanceof HTMLElement)) {
+        legend = document.createElement("div");
+        legend.className = ACADEMY_LEGEND_CLASS;
+        legend.innerHTML = `
+          <span class="tm-academy-legend-title">Legende:</span>
+          <span class="tm-academy-legend-item">
+            <span class="tm-academy-legend-swatch tm-academy-legend-todo"></span>
+            Vert = a faire
+          </span>
+          <span class="tm-academy-legend-item">
+            <span class="tm-academy-legend-swatch tm-academy-legend-remove"></span>
+            Rouge = a supprimer
+          </span>
+          <span class="tm-academy-legend-item">
+            <span class="tm-academy-legend-swatch tm-academy-legend-done"></span>
+            Bleu = deja faite
+          </span>
+        `;
+        host.insertBefore(legend, host.firstChild);
+      }
+    });
   }
 
   function getAcademyHighlightTarget(element, root) {
@@ -3115,6 +3265,9 @@
         continue;
       }
       if (candidate === root || !root.contains(candidate)) {
+        continue;
+      }
+      if (candidate.closest(`#${PANEL_ID}`)) {
         continue;
       }
       if (!isVisibleElement(candidate)) {
@@ -3249,12 +3402,130 @@
     return targets;
   }
 
+  function findAcademyTargetsByResolvedKey(researchKey, roots) {
+    const targets = new Set();
+    if (!roots.length) {
+      return targets;
+    }
+
+    roots.forEach((root) => {
+      const candidates = root.querySelectorAll(
+        "[data-research], [data-research-key], [data-research_key], [data-tech], [onclick*='research'], [onclick*='Research'], [id*='research'], [class*='research_'], [class*='technology_'], .research_box, .research, .research_item, .technology, .tech_tree_item, a, button, li, tr, div"
+      );
+      Array.from(candidates).slice(0, 800).forEach((node) => {
+        if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+          return;
+        }
+        const parsed = extractResearchKeyFromElement(node);
+        if (parsed !== researchKey) {
+          return;
+        }
+        const target = getAcademyHighlightTarget(node, root);
+        if (target) {
+          targets.add(target);
+        }
+      });
+    });
+
+    return targets;
+  }
+
   function findAcademyTargetsForResearchKey(researchKey, roots) {
+    const byResolvedKey = findAcademyTargetsByResolvedKey(researchKey, roots);
+    if (byResolvedKey.size) {
+      return byResolvedKey;
+    }
     const byAlias = findAcademyTargetsByAliases(researchKey, roots);
     if (byAlias.size) {
       return byAlias;
     }
+    // Last resort: text fallback keeps highlighting alive on worlds/UI variants
+    // where research keys are not exposed in data-* / onclick attributes.
     return findAcademyTargetsByText(researchKey, roots);
+  }
+
+  function collectResearchKeysFromTargetNode(target) {
+    const out = new Set();
+    if (!target || !(target instanceof HTMLElement)) {
+      return out;
+    }
+
+    const direct = extractResearchKeyFromElement(target);
+    if (direct) {
+      out.add(direct);
+    }
+
+    const probes = target.querySelectorAll(
+      "[data-research], [data-research-key], [data-research_key], [data-tech], [onclick*='research'], [onclick*='Research'], [id*='research'], [class*='research_'], [class*='technology_']"
+    );
+    Array.from(probes).slice(0, 40).forEach((node) => {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+      const parsed = extractResearchKeyFromElement(node);
+      if (parsed) {
+        out.add(parsed);
+      }
+    });
+
+    return out;
+  }
+
+  function getStrictAcademyTargetsForResearchKey(targets, researchKey) {
+    const nodes = Array.from(targets || []);
+    if (!nodes.length) {
+      return [];
+    }
+
+    const strict = nodes.filter((node) => {
+      const keys = collectResearchKeysFromTargetNode(node);
+      return keys.size === 1 && keys.has(researchKey);
+    });
+    if (strict.length) {
+      return strict;
+    }
+
+    return nodes;
+  }
+
+  function buildAcademyTargetMap(roots) {
+    const out = new Map();
+    if (!Array.isArray(roots) || !roots.length) {
+      return out;
+    }
+
+    roots.forEach((root) => {
+      const candidates = root.querySelectorAll(
+        ".research_box, .research, .research_item, .technology, .tech_tree_item, [data-research], [data-research-key], [data-research_key], [data-tech], [onclick*='research'], [onclick*='Research'], [id*='research'], [class*='research_'], [class*='technology_']"
+      );
+      Array.from(candidates).slice(0, 1200).forEach((node) => {
+        if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+          return;
+        }
+        const target = getAcademyHighlightTarget(node, root);
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const keys = collectResearchKeysFromTargetNode(target);
+        if (!keys.size) {
+          const direct = extractResearchKeyFromElement(node);
+          if (direct) {
+            keys.add(direct);
+          }
+        }
+        keys.forEach((researchKey) => {
+          if (!researchKey || !getResearchConfig(researchKey)) {
+            return;
+          }
+          if (!out.has(researchKey)) {
+            out.set(researchKey, new Set());
+          }
+          out.get(researchKey).add(target);
+        });
+      });
+    });
+
+    return out;
   }
 
   function isAcademyResearchTargetDone(target) {
@@ -3287,10 +3558,7 @@
       /\balready[_\s-]?researched\b/,
       /\bis[_\s-]?researched\b/,
       /\bresearch[_\s-]?done\b/,
-      /\bresearch[_\s-]?completed\b/,
-      /\bcompleted\b/,
-      /\bdone\b/,
-      /\bchecked\b/
+      /\bresearch[_\s-]?completed\b/
     ];
     if (strongDoneClassPatterns.some((pattern) => pattern.test(classSignals))) {
       return true;
@@ -3299,7 +3567,6 @@
     const strongDoneActionPatterns = [
       /\breset[_\s-]?research\b/,
       /\brevert[_\s-]?research\b/,
-      /\bcancel[_\s-]?research\b/,
       /\bunlearn[_\s-]?research\b/
     ];
     if (strongDoneActionPatterns.some((pattern) => pattern.test(signals))) {
@@ -3309,7 +3576,9 @@
     const donePatterns = [
       /\bis_?researched\b/,
       /\balready[_\s-]?researched\b/,
-      /\bresearched\b/,
+      /\balready researched\b/,
+      /\bdeja[_\s-]?recherchee?\b/,
+      /\brecherchee?\b/,
       /\bcompleted\b/,
       /\bdone\b/,
       /\bfinished\b/,
@@ -3325,7 +3594,14 @@
       /\bnot researched\b/,
       /\bresearchable\b/,
       /\bcan[_\s-]?research\b/,
+      /\bset[_\s-]?research\b/,
+      /\bresearch\s*\(/,
       /\ba[_\s-]?faire\b/,
+      /\bpas[_\s-]?recherchee?\b/,
+      /\bnon[_\s-]?recherchee?\b/,
+      /\bmanque\b/,
+      /\bprerequis\b/,
+      /\bnon[_\s-]?disponible\b/,
       /\btodo\b/
     ];
 
@@ -3336,14 +3612,6 @@
       return true;
     }
 
-    // Some academy widgets expose done researches as inactive/disabled tiles without textual "done".
-    const hasPassiveStateHint = /\block(?:ed)?\b|\binactive\b|\bdisabled\b/.test(signals);
-    const hasStartResearchAction = /\bset[_\s-]?research\b|\bresearch\s*\(/.test(signals)
-      && !strongDoneActionPatterns.some((pattern) => pattern.test(signals));
-    if (!hasDoneHint && hasPassiveStateHint && !hasStartResearchAction && !hasExplicitNotDoneHint) {
-      return true;
-    }
-
     if (hasDoneHint && hasExplicitNotDoneHint) {
       return !/\bnot[_\s-]?researched\b/.test(signals);
     }
@@ -3351,8 +3619,53 @@
     return false;
   }
 
+  function isAcademyResearchTargetExplicitlyNotDone(target) {
+    if (!target || !(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    const sampleNodes = [target].concat(
+      Array.from(target.querySelectorAll("*")).slice(0, 40).filter((node) => node instanceof HTMLElement)
+    );
+    const signals = normalizeSimpleText(sampleNodes.map((node) => [
+      node.className || "",
+      node.getAttribute("data-state") || "",
+      node.getAttribute("data-status") || "",
+      node.getAttribute("title") || "",
+      node.getAttribute("aria-label") || "",
+      node.getAttribute("data-tooltip") || "",
+      node.getAttribute("onclick") || "",
+      node.getAttribute("data-action") || "",
+      node.textContent || ""
+    ].join(" ")).join(" | "));
+    if (!signals) {
+      return false;
+    }
+
+    const explicitNotDonePatterns = [
+      /\bnot[_\s-]?researched\b/,
+      /\bnot researched\b/,
+      /\bresearchable\b/,
+      /\bcan[_\s-]?research\b/,
+      /\bset[_\s-]?research\b/,
+      /\bresearch\s*\(/,
+      /\ba[_\s-]?faire\b/,
+      /\bpas[_\s-]?recherchee?\b/,
+      /\bnon[_\s-]?recherchee?\b/,
+      /\bmanque\b/,
+      /\bprerequis\b/,
+      /\bnon[_\s-]?disponible\b/,
+      /\btodo\b/
+    ];
+    return explicitNotDonePatterns.some((pattern) => pattern.test(signals));
+  }
+
   function highlightAcademyResearches(researchStatus) {
     clearAcademyResearchHighlights();
+    const roots = getAcademyRoots();
+    if (roots.length) {
+      ensureAcademyLegend(roots);
+    }
     const activeResearches = researchStatus && researchStatus.active instanceof Set
       ? researchStatus.active
       : new Set();
@@ -3364,34 +3677,56 @@
     if (!activeResearches.size && !recommendedResearches.size) {
       return;
     }
-
-    const roots = getAcademyRoots();
     if (!roots.length) {
       return;
     }
 
     const interestingResearches = new Set([...recommendedResearches, ...activeResearches]);
+    const claimedNodes = new Set();
     interestingResearches.forEach((researchKey) => {
-      const targets = findAcademyTargetsForResearchKey(researchKey, roots);
-      if (!targets.size) {
+      let nodes = getStrictAcademyTargetsForResearchKey(
+        findAcademyTargetsForResearchKey(researchKey, roots),
+        researchKey
+      );
+      if (!nodes.length) {
+        const emergencyRoots = Array.from(
+          document.querySelectorAll("#building_academy, [data-window-type='building_academy'], [id^='gpwnd_'] .window_content")
+        ).filter((node) => node instanceof HTMLElement && isVisibleElement(node) && !node.closest(`#${PANEL_ID}`));
+        if (emergencyRoots.length) {
+          nodes = getStrictAcademyTargetsForResearchKey(
+            findAcademyTargetsForResearchKey(researchKey, emergencyRoots),
+            researchKey
+          );
+        }
+      }
+      if (!nodes.length) {
         return;
       }
-      const isDoneFromDom = Array.from(targets).some((node) => isAcademyResearchTargetDone(node));
-      const isDone = activeResearches.has(researchKey) || isDoneFromDom;
+      const isDoneFromDom = nodes.some((node) => isAcademyResearchTargetDone(node));
+      const isExplicitlyNotDoneFromDom = nodes.some((node) => isAcademyResearchTargetExplicitlyNotDone(node));
       let stateClass = "";
       if (recommendedResearches.has(researchKey)) {
-        stateClass = isDone
-          ? ACADEMY_HIGHLIGHT_DONE_CLASS
-          : ACADEMY_HIGHLIGHT_TODO_CLASS;
-      } else if (isDone) {
+        if (isDoneFromDom && !isExplicitlyNotDoneFromDom) {
+          stateClass = ACADEMY_HIGHLIGHT_DONE_CLASS;
+        } else if (isExplicitlyNotDoneFromDom && !isDoneFromDom) {
+          stateClass = ACADEMY_HIGHLIGHT_TODO_CLASS;
+        } else {
+          stateClass = activeResearches.has(researchKey)
+            ? ACADEMY_HIGHLIGHT_DONE_CLASS
+            : ACADEMY_HIGHLIGHT_TODO_CLASS;
+        }
+      } else if (isDoneFromDom && !isExplicitlyNotDoneFromDom) {
+        stateClass = ACADEMY_HIGHLIGHT_REMOVE_CLASS;
+      } else if (activeResearches.has(researchKey)) {
         stateClass = ACADEMY_HIGHLIGHT_REMOVE_CLASS;
       }
       if (!stateClass) {
         return;
       }
-      targets.forEach((node) => {
-        if (node instanceof HTMLElement) {
+      nodes.forEach((node) => {
+        if (node instanceof HTMLElement && !claimedNodes.has(node)) {
           node.classList.add(stateClass);
+          claimedNodes.add(node);
         }
       });
     });
@@ -3928,26 +4263,224 @@
     }
   }
 
+  function addUnitCountEntry(out, rawKey, rawValue) {
+    if (!out || !rawKey) {
+      return;
+    }
+    const unitKey = normalizeToken(rawKey);
+    if (!unitKey || !TRACKED_GAME_UNIT_KEYS.has(unitKey)) {
+      return;
+    }
+    const count = readLooseNumber(rawValue);
+    if (count === null || !Number.isFinite(count)) {
+      return;
+    }
+    const safeCount = Math.max(0, Math.floor(count));
+    const previous = toInt(out[unitKey], 0);
+    if (safeCount > previous) {
+      out[unitKey] = safeCount;
+    }
+  }
+
+  function collectUnitCountsFromRecord(record, out) {
+    if (!record || typeof record !== "object" || !out) {
+      return;
+    }
+    Object.entries(record).forEach(([rawKey, rawValue]) => {
+      addUnitCountEntry(out, rawKey, rawValue);
+    });
+  }
+
+  function collectUnitCountsFromSource(source, out, townId, strictTownFilter) {
+    if (!source || !out) {
+      return;
+    }
+    if (Array.isArray(source)) {
+      source.forEach((entry) => collectUnitCountsFromSource(entry, out, townId, strictTownFilter));
+      return;
+    }
+    if (typeof source.toArray === "function") {
+      try {
+        const list = source.toArray();
+        if (Array.isArray(list)) {
+          list.forEach((entry) => collectUnitCountsFromSource(entry, out, townId, strictTownFilter));
+        }
+      } catch (_) {}
+    }
+    if (source.models && Array.isArray(source.models)) {
+      source.models.forEach((entry) => collectUnitCountsFromSource(entry, out, townId, strictTownFilter));
+    }
+
+    const attrs = source.attributes && typeof source.attributes === "object"
+      ? source.attributes
+      : source;
+    if (!attrs || typeof attrs !== "object") {
+      return;
+    }
+
+    const modelTownId = pickFirstFiniteNumber(attrs.town_id, attrs.townId, attrs.tid, attrs.id_town);
+    if (townId !== null && modelTownId !== null && Number(modelTownId) !== townId) {
+      return;
+    }
+    if (strictTownFilter && townId !== null && modelTownId === null) {
+      return;
+    }
+
+    collectUnitCountsFromRecord(attrs, out);
+    collectUnitCountsFromRecord(attrs.units, out);
+    collectUnitCountsFromRecord(attrs.home_units, out);
+    collectUnitCountsFromRecord(attrs.all_units, out);
+    collectUnitCountsFromRecord(attrs.units_home, out);
+    collectUnitCountsFromRecord(source.units, out);
+    collectUnitCountsFromRecord(source.home_units, out);
+    collectUnitCountsFromRecord(source.all_units, out);
+  }
+
+  function extractTownUnitCounts(town) {
+    const out = {};
+    if (!town) {
+      return out;
+    }
+    const townId = getTownNumericId(town);
+
+    try {
+      if (typeof town.units === "function") {
+        collectUnitCountsFromSource(town.units(), out, townId, false);
+      }
+    } catch (_) {}
+
+    try {
+      if (town.attributes && typeof town.attributes === "object") {
+        collectUnitCountsFromSource(town.attributes.units, out, townId, false);
+        collectUnitCountsFromSource(town.attributes.home_units, out, townId, false);
+        collectUnitCountsFromSource(town.attributes.all_units, out, townId, false);
+      }
+    } catch (_) {}
+
+    try {
+      if (town.town_model && typeof town.town_model.get === "function") {
+        collectUnitCountsFromSource(town.town_model.get("units"), out, townId, false);
+        collectUnitCountsFromSource(town.town_model.get("home_units"), out, townId, false);
+        collectUnitCountsFromSource(town.town_model.get("all_units"), out, townId, false);
+      }
+    } catch (_) {}
+
+    const modelSources = [];
+    try {
+      if (uw.MM) {
+        const playerId = uw.Game && uw.Game.player_id;
+        const collectionNames = ["TownUnits", "Units", "PlayerUnits", "UnitOrders", "UnitOrder"];
+        collectionNames.forEach((name) => {
+          try {
+            if (typeof uw.MM.getOnlyCollectionByName === "function") {
+              pushCollectionModels(modelSources, uw.MM.getOnlyCollectionByName(name));
+            }
+          } catch (_) {}
+          try {
+            if (typeof uw.MM.getOnlyCollectionByNameAndPlayerId === "function" && playerId !== undefined && playerId !== null) {
+              pushCollectionModels(modelSources, uw.MM.getOnlyCollectionByNameAndPlayerId(name, playerId));
+            }
+          } catch (_) {}
+        });
+      }
+    } catch (_) {}
+    modelSources.forEach((model) => {
+      collectUnitCountsFromSource(model, out, townId, true);
+    });
+
+    return out;
+  }
+
+  function getUnitPlanProgress(unitPlan, townUnitCounts) {
+    if (!unitPlan || !Array.isArray(unitPlan.units)) {
+      return { hasTarget: false, formed: 0, total: 0, percent: 0 };
+    }
+
+    let formed = 0;
+    let total = 0;
+    unitPlan.units.forEach((unit) => {
+      if (!unit || !unit.name) {
+        return;
+      }
+      const planned = Math.max(0, toInt(unit.count, 0));
+      if (planned <= 0) {
+        return;
+      }
+      total += planned;
+      const candidates = getGameUnitKeyCandidatesForUnitName(unit.name);
+      let actual = 0;
+      candidates.forEach((unitKey) => {
+        actual = Math.max(actual, Math.max(0, toInt(townUnitCounts && townUnitCounts[unitKey], 0)));
+      });
+      formed += Math.min(planned, actual);
+    });
+
+    const percent = total > 0 ? Math.round((formed / total) * 100) : 0;
+    return {
+      hasTarget: total > 0,
+      formed,
+      total,
+      percent
+    };
+  }
+
+  function formatUnitPlanProgress(progress) {
+    if (!progress || !progress.hasTarget) {
+      return "Unites formees: -";
+    }
+    return `Unites formees: ${progress.formed}/${progress.total} (${progress.percent}%)`;
+  }
+
   function isResearchValueActive(value) {
     if (typeof value === "boolean") {
       return value;
+    }
+    if (typeof value === "number") {
+      return Number.isFinite(value) && value > 0;
+    }
+    if (typeof value === "string") {
+      const text = normalizeSimpleText(value);
+      if (!text) {
+        return false;
+      }
+      const numeric = readLooseNumber(text);
+      if (numeric !== null) {
+        return numeric > 0;
+      }
+      if (/\bdone\b|\bcompleted\b|\bresearched\b|\bdeja\b|\btrue\b|\bok\b/.test(text)) {
+        return true;
+      }
+      if (/\bnot\b|\bfalse\b|\bavailable\b|\blocked\b|\bprerequis\b|\bmissing\b|\bpending\b/.test(text)) {
+        return false;
+      }
+      return false;
     }
     if (value && typeof value === "object") {
       const nested = pickFirstFiniteNumber(
         value.researched,
         value.completed,
         value.done,
-        value.active,
-        value.value,
         value.level
       );
       if (nested !== null) {
         return nested > 0;
       }
-      return Boolean(value.researched || value.completed || value.done || value.active);
+      const stateText = normalizeSimpleText(
+        value.status ||
+        value.state ||
+        value.result ||
+        value.progress_status ||
+        ""
+      );
+      if (/\bdone\b|\bcompleted\b|\bresearched\b|\bdeja\b/.test(stateText)) {
+        return true;
+      }
+      if (/\bnot\b|\bavailable\b|\blocked\b|\bmissing\b|\bpending\b/.test(stateText)) {
+        return false;
+      }
+      return Boolean(value.researched || value.completed || value.done);
     }
-    const parsed = readLooseNumber(value);
-    return parsed !== null ? parsed > 0 : Boolean(value);
+    return false;
   }
 
   function collectResearchKeysFromRecord(record, out) {
@@ -3995,15 +4528,8 @@
       collectResearchKeysFromRecord(source.researches, out);
     }
 
-    if (typeof source.get === "function") {
-      Object.keys(RESEARCH_LIBRARY).forEach((researchKey) => {
-        try {
-          if (isResearchValueActive(source.get(researchKey))) {
-            out.add(researchKey);
-          }
-        } catch (_) {}
-      });
-    }
+    // NOTE: Avoid probing `source.get(researchKey)` for every key.
+    // On some model types this returns non-status objects/strings and creates false positives.
   }
 
   function extractTownResearchKeys(town) {
@@ -4072,8 +4598,16 @@
       if (!directKey || !getResearchConfig(directKey)) {
         return;
       }
-      const explicitStatus = pickFirstFiniteNumber(attrs.researched, attrs.completed, attrs.done, attrs.active);
-      if (explicitStatus === null || explicitStatus > 0) {
+      const explicitStatus = pickFirstFiniteNumber(attrs.researched, attrs.completed, attrs.done);
+      const rawStatus = normalizeSimpleText(
+        attrs.status ||
+        attrs.state ||
+        attrs.result ||
+        attrs.progress_status ||
+        ""
+      );
+      const impliedDone = /\bdone\b|\bcompleted\b|\bresearched\b|\bdeja\b/.test(rawStatus);
+      if ((explicitStatus !== null && explicitStatus > 0) || impliedDone) {
         out.add(directKey);
       }
     });
@@ -6295,6 +6829,54 @@
           0 0 10px rgba(63, 125, 255, 0.85) !important;
       }
 
+      .${ACADEMY_LEGEND_CLASS} {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 10px;
+        margin: 4px 0 8px;
+        padding: 6px 8px;
+        border: 1px solid rgba(61, 43, 20, 0.45);
+        border-radius: 3px;
+        background: linear-gradient(180deg, rgba(250, 241, 223, 0.95) 0%, rgba(233, 216, 184, 0.95) 100%);
+        color: #4a3014;
+        font-size: 11px;
+        line-height: 1.2;
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-title {
+        font-weight: 700;
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        white-space: nowrap;
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-swatch {
+        width: 11px;
+        height: 11px;
+        border-radius: 2px;
+        box-sizing: border-box;
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-todo {
+        border: 2px solid #39c865;
+        box-shadow: 0 0 4px rgba(57, 200, 101, 0.75);
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-remove {
+        border: 2px solid #ff4040;
+        box-shadow: 0 0 4px rgba(255, 64, 64, 0.75);
+      }
+
+      .${ACADEMY_LEGEND_CLASS} .tm-academy-legend-done {
+        border: 2px solid #3f7dff;
+        box-shadow: 0 0 4px rgba(63, 125, 255, 0.75);
+      }
+
       @media (max-width: 700px) {
         #${PANEL_ID} {
           left: 8px;
@@ -6457,6 +7039,7 @@
     const unitPlanPresetKey = resolveUnitPlanPresetKey(preset.key, assignedPresetKey);
     const unitPlans = getUnitPlansForPreset(unitPlanPresetKey);
     const selectedUnitPlan = getSelectedUnitPlanForTown(unitPlanPresetKey, town);
+    const townUnitCounts = extractTownUnitCounts(town);
     const selectedUnitPlanId = selectedUnitPlan ? selectedUnitPlan.id : "";
     const assignedUnitPlanPresetKey = assignedPresetKey
       ? resolveUnitPlanPresetKey(assignedPresetKey, assignedPresetKey)
@@ -6464,6 +7047,8 @@
     const assignedUnitPlan = assignedPresetKey
       ? getSelectedUnitPlanForTown(assignedUnitPlanPresetKey, town)
       : null;
+    const displayedUnitPlan = (assignedPresetKey && assignedUnitPlan) ? assignedUnitPlan : selectedUnitPlan;
+    const unitPlanProgressText = formatUnitPlanProgress(getUnitPlanProgress(displayedUnitPlan, townUnitCounts));
     if (unitPlanSelectEl) {
       const listKey = `${unitPlanPresetKey}:${unitPlans.length}`;
       if (unitPlanSelectEl.getAttribute("data-plan-list-key") !== listKey) {
@@ -6482,9 +7067,9 @@
     }
     if (unitPlanSummaryEl) {
       if (assignedPresetKey && assignedUnitPlan) {
-        unitPlanSummaryEl.textContent = `Compo sauvegardee: ${formatUnitPlanLabel(assignedUnitPlan) || "-"}`;
+        unitPlanSummaryEl.textContent = `Compo sauvegardee: ${formatUnitPlanLabel(assignedUnitPlan) || "-"} | ${unitPlanProgressText}`;
       } else {
-        unitPlanSummaryEl.textContent = formatUnitPlanSummary(selectedUnitPlan);
+        unitPlanSummaryEl.textContent = `${formatUnitPlanSummary(selectedUnitPlan)} | ${unitPlanProgressText}`;
       }
     }
     updateActions(panel, preset);
