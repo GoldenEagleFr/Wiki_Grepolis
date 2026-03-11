@@ -26,6 +26,16 @@
   const MINI_DOCK_ID = "tm-grepolis-opt-dock";
   const CUSTOM_PRESET_ID = "custom";
   const GENERIC_UNIT_PLAN_KEY = "generic";
+  const LAND_UNIT_KEYS = Object.freeze(["sword", "slinger", "archer", "hoplite", "rider", "chariot", "catapult"]);
+  const LAND_UNIT_LABELS = Object.freeze({
+    sword: "Epeiste",
+    slinger: "Frondeur",
+    archer: "Archer",
+    hoplite: "Hoplite",
+    rider: "Cavalier",
+    chariot: "Char",
+    catapult: "Catapulte"
+  });
   const DIO_TOWN_ICON_CODE_BY_PRESET = Object.freeze({
     full_biremes: "sd",
     full_bateaux_feu: "so",
@@ -116,6 +126,7 @@
   });
   const SPECIAL_BUILDING_KEYS = new Set(["lighthouse", "tower", "thermal", "library", "theater", "trade_office"]);
   const MIN_PANEL_WIDTH = 500;
+  const COLLAPSED_PANEL_BOTTOM = 8;
   const COMPACT_TABLE_ROW_COUNT = 4;
   const TIMING_COLUMN_TOOLTIP = "Attente: delai avant lancement depuis maintenant (inclut file + etapes precedentes + attente ressources) | Construction: duree du chantier | Fin estimee: heure relative de fin depuis maintenant";
   const DEFAULT_PANEL_LAYOUT = Object.freeze({
@@ -498,6 +509,7 @@
   let lastPresetSyncScope = "";
   const levelCacheByTown = new Map();
   const buildingMaxLevelCache = new Map();
+  const unitIconUrlCache = new Map();
 
   function toInt(value, fallback) {
     const n = Number(value);
@@ -569,6 +581,112 @@
     return dock;
   }
 
+  function extractFirstUrlFromCssValue(value) {
+    if (typeof value !== "string") {
+      return "";
+    }
+    const match = value.match(/url\((['"]?)(.*?)\1\)/i);
+    return match && match[2] ? match[2] : "";
+  }
+
+  function getUnitIconUrlCandidates(unitKey) {
+    const key = normalizeToken(unitKey);
+    if (!key) {
+      return [];
+    }
+    return [
+      `${CDN_BASE}/images/game/units/${key}.png`,
+      `${CDN_BASE}/images/game/units/unit_${key}.png`,
+      `${CDN_BASE}/images/game/unit/${key}.png`,
+      `${CDN_BASE}/images/game/unit_icons/${key}.png`,
+      `${CDN_BASE}/images/game/icons/unit/${key}.png`
+    ];
+  }
+
+  function getUnitIconUrlForKey(unitKey) {
+    const key = normalizeToken(unitKey);
+    if (!key) {
+      return "";
+    }
+    if (unitIconUrlCache.has(key)) {
+      return unitIconUrlCache.get(key) || "";
+    }
+
+    let detectedUrl = "";
+
+    try {
+      const selector = [
+        `img[src*="/images/game/units/${key}.png"]`,
+        `img[src*="/images/game/units/unit_${key}.png"]`,
+        `img[src*="${key}.png"]`
+      ].join(", ");
+      const iconNode = document.querySelector(selector);
+      if (iconNode) {
+        detectedUrl = iconNode.getAttribute("src") || "";
+      }
+    } catch (_) {}
+
+    if (!detectedUrl) {
+      try {
+        const aliases = Array.from(new Set(
+          [key]
+            .concat(getGameUnitKeyCandidatesForUnitName(key).map((candidate) => normalizeToken(candidate)).filter(Boolean))
+        ));
+        const classSelector = [];
+        aliases.forEach((alias) => {
+          classSelector.push(`.unit_icon40x40.${alias}`);
+          classSelector.push(`.unit_icon30x30.${alias}`);
+          classSelector.push(`.unit_icon25x25.${alias}`);
+          classSelector.push(`.unit_icon20x20.${alias}`);
+          classSelector.push(`.unit_icon40x40.unit_icon40x40_${alias}`);
+          classSelector.push(`.unit_icon30x30.unit_icon30x30_${alias}`);
+          classSelector.push(`.unit_icon25x25.unit_icon25x25_${alias}`);
+          classSelector.push(`.unit_icon20x20.unit_icon20x20_${alias}`);
+        });
+        const classNode = document.querySelector(classSelector.join(", "));
+        if (classNode) {
+          const style = window.getComputedStyle(classNode);
+          detectedUrl = extractFirstUrlFromCssValue(style.backgroundImage || "");
+        } else {
+          const allIconNodes = document.querySelectorAll(".unit_icon40x40, .unit_icon30x30, .unit_icon25x25, .unit_icon20x20");
+          const fallbackNode = Array.from(allIconNodes).find((node) =>
+            aliases.some((alias) => node.classList.contains(alias))
+          );
+          if (fallbackNode) {
+            const style = window.getComputedStyle(fallbackNode);
+            detectedUrl = extractFirstUrlFromCssValue(style.backgroundImage || "");
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!detectedUrl) {
+      const candidates = getUnitIconUrlCandidates(key);
+      detectedUrl = candidates.length ? candidates[0] : "";
+    }
+
+    unitIconUrlCache.set(key, detectedUrl || "");
+    return detectedUrl || "";
+  }
+
+  function getMiniDockUnitCssKey(unitKey) {
+    const normalized = normalizeToken(unitKey);
+    switch (normalized) {
+      case "fire_ship":
+      case "attack_ship":
+        return "attack_ship";
+      case "fast_transport_ship":
+      case "fast_transporter":
+      case "small_transporter":
+        return "small_transporter";
+      case "colony_ship":
+      case "colonize_ship":
+        return "colonize_ship";
+      default:
+        return normalized;
+    }
+  }
+
   function updateMiniDock(data) {
     const dock = buildMiniDock();
     if (!dock) {
@@ -586,7 +704,49 @@
       typeEl.textContent = `Type: ${data && data.type ? data.type : "-"}`;
     }
     if (compoEl) {
-      compoEl.textContent = `Unites: ${data && data.compo ? data.compo : "-"}`;
+      const landUnits = Array.isArray(data && data.terrestrialUnits)
+        ? data.terrestrialUnits
+        : [];
+      compoEl.innerHTML = "";
+      if (landUnits.length) {
+        const label = document.createElement("span");
+        label.className = "tm-dock-label";
+        label.textContent = "Unites:";
+        compoEl.appendChild(label);
+
+        const unitsWrap = document.createElement("span");
+        unitsWrap.className = "tm-dock-units";
+        landUnits.forEach((unit) => {
+          if (!unit || !unit.key) {
+            return;
+          }
+          const chip = document.createElement("span");
+          chip.className = "tm-dock-unit-chip";
+          chip.title = `${unit.label || unit.key}: ${toInt(unit.formed, 0)}/${toInt(unit.total, 0)}`;
+          const formed = toInt(unit.formed, 0);
+          const total = toInt(unit.total, 0);
+          const cssUnitKey = getMiniDockUnitCssKey(unit.key) || normalizeToken(unit.key);
+
+          const icon = document.createElement("span");
+          icon.className = `tm-dock-unit-icon-wrap unit_icon40x40 ${cssUnitKey} unit`;
+          icon.setAttribute("data-type", cssUnitKey);
+
+          const selectedBorder = document.createElement("span");
+          selectedBorder.className = "selected_border";
+          icon.appendChild(selectedBorder);
+
+          const count = document.createElement("span");
+          count.className = "tm-dock-unit-count";
+          count.textContent = `${formed}/${total}`;
+
+          chip.appendChild(icon);
+          chip.appendChild(count);
+          unitsWrap.appendChild(chip);
+        });
+        compoEl.appendChild(unitsWrap);
+      } else {
+        compoEl.textContent = `Unites: ${data && data.compo ? data.compo : "-"}`;
+      }
     }
     if (queueEl) {
       queueEl.textContent = `File: ${data && data.queue ? data.queue : "-"}`;
@@ -4503,6 +4663,52 @@
     return `Unites formees: ${progress.formed}/${progress.total} (${progress.percent}%)`;
   }
 
+  function getTerrestrialUnitProgressEntries(unitPlan, townUnitCounts) {
+    if (!unitPlan || !Array.isArray(unitPlan.units)) {
+      return [];
+    }
+
+    const entriesByKey = new Map();
+    unitPlan.units.forEach((unit) => {
+      if (!unit || !unit.name) {
+        return;
+      }
+      const planned = Math.max(0, toInt(unit.count, 0));
+      if (planned <= 0) {
+        return;
+      }
+      const candidates = getGameUnitKeyCandidatesForUnitName(unit.name)
+        .map((key) => normalizeToken(key))
+        .filter(Boolean);
+      const fallbackKey = normalizeToken(resolveUnitPlanUnitKey(unit.name));
+      const unitKey = candidates.length ? candidates[0] : fallbackKey;
+      if (!unitKey) {
+        return;
+      }
+
+      let actual = 0;
+      candidates.forEach((candidate) => {
+        actual = Math.max(actual, Math.max(0, toInt(townUnitCounts && townUnitCounts[candidate], 0)));
+      });
+
+      const current = entriesByKey.get(unitKey);
+      if (current) {
+        current.total += planned;
+        current.formed = Math.min(current.total, actual);
+        return;
+      }
+
+      entriesByKey.set(unitKey, {
+        key: unitKey,
+        label: LAND_UNIT_LABELS[unitKey] || String(unit.name),
+        formed: Math.min(planned, actual),
+        total: planned
+      });
+    });
+
+    return Array.from(entriesByKey.values());
+  }
+
   function isResearchValueActive(value) {
     if (typeof value === "boolean") {
       return value;
@@ -5679,6 +5885,7 @@
     }
     const normalized = normalizePanelLayout(layout) || { ...DEFAULT_PANEL_LAYOUT };
     panel.style.top = `${normalized.top}px`;
+    panel.style.bottom = "";
     if (normalized.left === null) {
       panel.style.left = "";
       panel.style.right = `${normalized.right}px`;
@@ -5698,6 +5905,9 @@
     if (!panel) {
       return;
     }
+    if (panel.classList.contains("tm-collapsed")) {
+      return;
+    }
     const rect = panel.getBoundingClientRect();
     const hasManualHeight = typeof panel.style.height === "string" && /px$/.test(panel.style.height);
     const layout = {
@@ -5712,6 +5922,17 @@
 
   function constrainPanelToViewport(panel) {
     if (!panel) {
+      return;
+    }
+    if (panel.classList.contains("tm-collapsed")) {
+      const hasExplicitLeft = typeof panel.style.left === "string" && /px$/.test(panel.style.left);
+      if (hasExplicitLeft) {
+        const rect = panel.getBoundingClientRect();
+        const maxLeft = Math.max(0, window.innerWidth - rect.width);
+        const left = Math.min(Math.max(0, rect.left), maxLeft);
+        panel.style.left = `${Math.round(left)}px`;
+        panel.style.right = "auto";
+      }
       return;
     }
     const rect = panel.getBoundingClientRect();
@@ -5997,6 +6218,10 @@
         collapseBtn.classList.toggle("minimize", !collapsed);
         collapseBtn.classList.toggle("maximize", collapsed);
         collapseBtn.setAttribute("aria-label", collapsed ? "Agrandir" : "Reduire");
+        constrainPanelToViewport(panel);
+        if (!collapsed) {
+          persistPanelLayout(panel);
+        }
       });
     }
     const closeBtn = panel.querySelector(".tm-close-btn");
@@ -6487,6 +6712,49 @@
         text-overflow: ellipsis;
       }
 
+      #${MINI_DOCK_ID} .tm-dock-compo {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-label {
+        font-weight: 700;
+        margin-right: 6px;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-units {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        vertical-align: middle;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-unit-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 1px 4px;
+        border: 1px solid rgba(119, 78, 34, 0.28);
+        background: rgba(255, 247, 230, 0.7);
+        border-radius: 2px;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-unit-icon-wrap {
+        flex: 0 0 40px;
+        width: 40px;
+        height: 40px;
+        position: relative;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-unit-count {
+        display: inline-block;
+        min-width: 38px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+
       #${PANEL_ID} .tm-queue-list {
         display: none;
         margin: 0 8px;
@@ -6914,6 +7182,8 @@
         min-height: 44px;
         height: 44px !important;
         resize: none;
+        top: auto !important;
+        bottom: ${COLLAPSED_PANEL_BOTTOM}px !important;
       }
 
       #${PANEL_ID}.tm-collapsed .wnd_border_b,
@@ -7121,10 +7391,27 @@
       if (planPreviewEl) {
         planPreviewEl.textContent = "Fallback actif.";
       }
+      let fallbackDockUnits = [];
+      try {
+        const fallbackTown = getTown();
+        const fallbackAssignedPresetKey = getAssignedPresetForTown(fallbackTown);
+        const fallbackUnitPlanPresetKey = resolveUnitPlanPresetKey(getSelectedPreset(), fallbackAssignedPresetKey);
+        const fallbackSelectedPlan = getSelectedUnitPlanForTown(fallbackUnitPlanPresetKey, fallbackTown);
+        const fallbackAssignedPlan = fallbackAssignedPresetKey
+          ? getSelectedUnitPlanForTown(resolveUnitPlanPresetKey(fallbackAssignedPresetKey, fallbackAssignedPresetKey), fallbackTown)
+          : null;
+        const fallbackDisplayedPlan = fallbackAssignedPlan || fallbackSelectedPlan;
+        fallbackDockUnits = getTerrestrialUnitProgressEntries(
+          fallbackDisplayedPlan,
+          extractTownUnitCounts(fallbackTown)
+        );
+      } catch (_) {}
+
       updateMiniDock({
         town: getTownName(getTown()),
         type: "indisponible",
         compo: "-",
+        terrestrialUnits: fallbackDockUnits,
         queue: "indisponible",
         next: "Rendu en fallback"
       });
@@ -7352,6 +7639,7 @@
         town: getTownName(town),
         type: (assignedPresetConfig && assignedPresetConfig.label) || preset.label || "-",
         compo: "en attente",
+        terrestrialUnits: getTerrestrialUnitProgressEntries(displayedUnitPlan, townUnitCounts),
         queue: buildingOrders.length ? `${buildingOrders.length} ordres` : "vide",
         next: "En attente des donnees de ville"
       });
@@ -7622,6 +7910,7 @@
       town: townName,
       type: dockTypeLabel,
       compo: dockCompoLabel,
+      terrestrialUnits: getTerrestrialUnitProgressEntries(displayedUnitPlan, townUnitCounts),
       queue: dockQueueLabel,
       next: (nextActionEl && nextActionEl.textContent) || "-"
     });
