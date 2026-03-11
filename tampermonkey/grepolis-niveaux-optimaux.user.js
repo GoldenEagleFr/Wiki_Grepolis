@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grepolis - Niveaux optimaux de batiments
 // @namespace    https://github.com/GoldenEagleFr/Wiki_Grepolis
-// @version      1.4.0
+// @version      1.5.9
 // @description  Niveaux optimaux avec simulation cout/temps, mode monde (Revolte/Conquete), fenetre deplacable et redimensionnable.
 // @author       GoldenEagleFr
 // @match        https://*.grepolis.com/game/*
@@ -16,19 +16,19 @@
   const uw = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
   const STORAGE_KEY = "tm_grepolis_preset_v1";
   const PRESET_BY_TOWN_KEY_PREFIX = "tm_grepolis_preset_by_town_v1";
+  const UNIT_PLAN_BY_TOWN_KEY_PREFIX = "tm_grepolis_unit_plan_by_town_v1";
   const WORLD_MODE_KEY = "tm_grepolis_world_mode_v1";
   const CUSTOM_TARGETS_KEY_PREFIX = "tm_grepolis_custom_targets_v2";
   const LEGACY_CUSTOM_TARGETS_KEY = "tm_grepolis_custom_targets_v1";
   const PANEL_LAYOUT_KEY = "tm_grepolis_panel_layout_v1";
   const PANEL_ID = "tm-grepolis-opt-panel";
   const CUSTOM_PRESET_ID = "custom";
+  const GENERIC_UNIT_PLAN_KEY = "generic";
   const DIO_TOWN_ICON_CODE_BY_PRESET = Object.freeze({
-    def_navale: "sd",
-    off_navale: "so",
-    def_terre: "ld",
-    off_terre: "lo",
-    def_myth: "fd",
-    off_myth: "fo"
+    full_biremes: "sd",
+    full_bateaux_feu: "so",
+    def_terrestres: "ld",
+    off_terrestres: "lo"
   });
   const DIO_TOWN_ICON_INDEX_BY_CODE = Object.freeze({
     lo: 0,
@@ -224,204 +224,268 @@
     25: 44.5
   });
 
-  const PRESETS_BY_MODE = {
-    revolte: {
-      def_navale: {
-        label: "DEF navale",
-        specialBuilding: { key: "lighthouse", target: [1, 1] },
-        priorityOrder: ["farm", "main", "dock", "academy", "lighthouse", "storage", "market", "barracks", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          dock: [25, 30],
-          academy: [30, 30],
-          lighthouse: [1, 1],
-          storage: [30, 35],
-          market: [15, 20],
-          barracks: [10, 15],
-          temple: [1, 10]
-        }
-      },
-      off_navale: {
-        label: "OFF navale",
-        specialBuilding: { key: "lighthouse", target: [1, 1] },
-        priorityOrder: ["farm", "main", "dock", "market", "academy", "lighthouse", "storage", "wall", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          dock: [30, 30],
-          market: [20, 25],
-          academy: [28, 30],
-          lighthouse: [1, 1],
-          storage: [28, 32],
-          wall: [1, 10],
-          temple: [1, 10]
-        }
-      },
-      def_terre: {
-        label: "DEF terrestre",
-        specialBuilding: { key: "tower", target: [1, 1] },
-        priorityOrder: ["farm", "main", "barracks", "wall", "tower", "academy", "storage", "market", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          barracks: [20, 25],
-          wall: [25, 25],
-          tower: [1, 1],
-          academy: [30, 30],
-          market: [15, 20],
-          storage: [30, 35],
-          temple: [1, 10]
-        }
-      },
-      off_terre: {
-        label: "OFF terrestre",
-        specialBuilding: { key: "thermal", target: [1, 1] },
-        priorityOrder: ["farm", "main", "barracks", "academy", "dock", "market", "thermal", "wall", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          barracks: [20, 25],
-          academy: [30, 30],
-          dock: [20, 25],
-          market: [20, 20],
-          thermal: [1, 1],
-          wall: [1, 10],
-          temple: [1, 10]
-        }
-      },
-      off_myth: {
-        label: "OFF mythique",
-        specialBuilding: { key: "thermal", target: [1, 1] },
-        priorityOrder: ["farm", "main", "temple", "academy", "barracks", "dock", "market", "thermal", "wall"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          temple: [25, 30],
-          academy: [30, 30],
-          barracks: [20, 20],
-          dock: [20, 20],
-          market: [20, 20],
-          thermal: [1, 1],
-          wall: [1, 10]
-        }
-      },
-      def_myth: {
-        label: "DEF mythique",
-        specialBuilding: { key: "tower", target: [1, 1] },
-        priorityOrder: ["farm", "main", "temple", "wall", "tower", "barracks", "academy", "storage", "market"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          temple: [25, 30],
-          wall: [25, 25],
-          tower: [1, 1],
-          barracks: [20, 20],
-          academy: [30, 30],
-          market: [15, 20],
-          storage: [30, 35]
-        }
+  const CITY_TYPE_PRESETS = Object.freeze({
+    full_biremes: Object.freeze({
+      label: "Full-Biremes",
+      specialBuilding: { key: "lighthouse", target: [1, 1] },
+      priorityOrder: ["farm", "main", "dock", "academy", "lighthouse", "storage", "lumber", "stoner", "ironer", "market", "barracks", "temple"],
+      optimizationResearches: ["architecture", "crane"],
+      recommendedResearches: [
+        "city_guard", "villagers_loyalty", "crane", "shipwright", "bireme",
+        "cryptography", "berth", "phalanx", "mathematics", "ram", "cartography", "architecture"
+      ],
+      targets: {
+        farm: [45, 45],
+        main: [24, 25],
+        dock: [20, 30],
+        academy: [30, 30],
+        lighthouse: [1, 1],
+        storage: [30, 35],
+        market: [15, 20],
+        barracks: [1, 10],
+        temple: [1, 10],
+        lumber: [45, 45],
+        stoner: [35, 40],
+        ironer: [30, 35]
       }
-    },
-    conquete: {
-      def_navale: {
-        label: "DEF navale",
-        specialBuilding: { key: "lighthouse", target: [1, 1] },
-        priorityOrder: ["farm", "main", "dock", "academy", "lighthouse", "storage", "market", "barracks", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          dock: [25, 30],
-          academy: [30, 30],
-          lighthouse: [1, 1],
-          storage: [32, 35],
-          market: [18, 22],
-          barracks: [10, 15],
-          temple: [5, 15]
-        }
-      },
-      off_navale: {
-        label: "OFF navale",
-        specialBuilding: { key: "lighthouse", target: [1, 1] },
-        priorityOrder: ["farm", "main", "dock", "market", "academy", "lighthouse", "storage", "wall", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          dock: [30, 30],
-          market: [22, 25],
-          academy: [30, 30],
-          lighthouse: [1, 1],
-          storage: [30, 35],
-          wall: [1, 5],
-          temple: [1, 10]
-        }
-      },
-      def_terre: {
-        label: "DEF terrestre",
-        specialBuilding: { key: "tower", target: [1, 1] },
-        priorityOrder: ["farm", "main", "barracks", "wall", "tower", "academy", "storage", "market", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          barracks: [20, 25],
-          wall: [25, 25],
-          tower: [1, 1],
-          academy: [30, 30],
-          market: [18, 22],
-          storage: [32, 35],
-          temple: [1, 10]
-        }
-      },
-      off_terre: {
-        label: "OFF terrestre",
-        specialBuilding: { key: "thermal", target: [1, 1] },
-        priorityOrder: ["farm", "main", "barracks", "academy", "dock", "market", "thermal", "wall", "temple"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          barracks: [20, 25],
-          academy: [30, 30],
-          dock: [18, 22],
-          market: [22, 25],
-          thermal: [1, 1],
-          wall: [1, 5],
-          temple: [1, 10]
-        }
-      },
-      off_myth: {
-        label: "OFF mythique",
-        specialBuilding: { key: "thermal", target: [1, 1] },
-        priorityOrder: ["farm", "main", "temple", "academy", "barracks", "dock", "market", "thermal", "wall"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          temple: [28, 30],
-          academy: [30, 30],
-          barracks: [20, 20],
-          dock: [18, 20],
-          market: [22, 25],
-          thermal: [1, 1],
-          wall: [1, 5]
-        }
-      },
-      def_myth: {
-        label: "DEF mythique",
-        specialBuilding: { key: "tower", target: [1, 1] },
-        priorityOrder: ["farm", "main", "temple", "wall", "tower", "barracks", "academy", "storage", "market"],
-        targets: {
-          farm: [45, 45],
-          main: [24, 25],
-          temple: [28, 30],
-          wall: [25, 25],
-          tower: [1, 1],
-          barracks: [20, 20],
-          academy: [30, 30],
-          market: [18, 22],
-          storage: [32, 35]
-        }
+    }),
+    full_bateaux_feu: Object.freeze({
+      label: "Full-Bateaux-feu",
+      specialBuilding: { key: "lighthouse", target: [1, 1] },
+      priorityOrder: ["farm", "main", "dock", "market", "academy", "lighthouse", "storage", "lumber", "stoner", "ironer", "wall", "temple"],
+      optimizationResearches: ["architecture", "crane"],
+      recommendedResearches: [
+        "city_guard", "villagers_loyalty", "crane", "shipwright", "fire_ship",
+        "cryptography", "berth", "phalanx", "mathematics", "ram", "cartography", "architecture"
+      ],
+      targets: {
+        farm: [45, 45],
+        main: [24, 25],
+        dock: [30, 30],
+        market: [20, 25],
+        academy: [28, 30],
+        lighthouse: [1, 1],
+        storage: [30, 35],
+        wall: [1, 10],
+        temple: [1, 10],
+        lumber: [45, 45],
+        stoner: [35, 40],
+        ironer: [30, 35]
       }
-    }
-  };
+    }),
+    off_terrestres: Object.freeze({
+      label: "OFF Terrestres",
+      specialBuilding: { key: "thermal", target: [1, 1] },
+      priorityOrder: ["farm", "main", "barracks", "academy", "dock", "market", "thermal", "lumber", "stoner", "ironer", "wall", "temple"],
+      optimizationResearches: ["architecture", "crane"],
+      recommendedResearches: [
+        "city_guard", "villagers_loyalty", "crane", "instructor", "shipwright", "hoplite",
+        "conscription", "fire_ship", "catapult", "cryptography", "fast_transport_ship",
+        "berth", "bunk", "phalanx", "mathematics", "ram", "cartography",
+        "conquest", "colony_ship", "architecture"
+      ],
+      targets: {
+        farm: [45, 45],
+        main: [24, 25],
+        barracks: [20, 25],
+        academy: [30, 30],
+        dock: [15, 20],
+        market: [20, 25],
+        thermal: [1, 1],
+        wall: [1, 10],
+        temple: [1, 10],
+        lumber: [30, 35],
+        stoner: [35, 40],
+        ironer: [45, 45]
+      }
+    }),
+    def_terrestres: Object.freeze({
+      label: "DEF Terrestres",
+      specialBuilding: { key: "tower", target: [1, 1] },
+      priorityOrder: ["farm", "main", "barracks", "wall", "tower", "thermal", "academy", "storage", "market", "dock", "lumber", "stoner", "ironer", "temple"],
+      optimizationResearches: ["architecture", "crane"],
+      recommendedResearches: [
+        "city_guard", "villagers_loyalty", "crane", "instructor", "shipwright",
+        "conscription", "archer", "cryptography", "fast_transport_ship", "berth",
+        "bunk", "phalanx", "mathematics", "ram", "cartography", "bireme", "architecture"
+      ],
+      targets: {
+        farm: [45, 45],
+        main: [24, 25],
+        barracks: [20, 25],
+        wall: [25, 25],
+        tower: [1, 1],
+        thermal: [1, 1],
+        academy: [30, 30],
+        market: [15, 20],
+        storage: [32, 35],
+        dock: [10, 15],
+        temple: [1, 10],
+        lumber: [45, 45],
+        stoner: [35, 40],
+        ironer: [30, 35]
+      }
+    })
+  });
+
+  const PRESETS_BY_MODE = Object.freeze({
+    revolte: CITY_TYPE_PRESETS,
+    conquete: CITY_TYPE_PRESETS
+  });
+
+  // Source (compositions navales/terrestres): https://grepolis-david1327.e-monsite.com/pages/specialisation-des-villes.html
+  const UNIT_PLAN_CATALOG = Object.freeze({
+    full_biremes: Object.freeze([
+      Object.freeze({
+        id: "full_biremes_300",
+        label: "Full Biremes",
+        units: Object.freeze([
+          Object.freeze({ name: "Biremes", count: 300 })
+        ])
+      })
+    ]),
+    full_bateaux_feu: Object.freeze([
+      Object.freeze({
+        id: "full_bateaux_feu_220",
+        label: "Full Bateaux-feu",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 220 })
+        ])
+      })
+    ]),
+    off_terrestres: Object.freeze([
+      Object.freeze({
+        id: "off_terre_a",
+        label: "OFF Terre A",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 25 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Frondeurs", count: 1000 }),
+          Object.freeze({ name: "Cavaliers", count: 200 })
+        ])
+      }),
+      Object.freeze({
+        id: "off_terre_b",
+        label: "OFF Terre B",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 25 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Cavaliers", count: 400 }),
+          Object.freeze({ name: "Catapultes", count: 26 })
+        ])
+      }),
+      Object.freeze({
+        id: "off_terre_c",
+        label: "OFF Terre C",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 25 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Chars", count: 250 }),
+          Object.freeze({ name: "Cavaliers", count: 100 }),
+          Object.freeze({ name: "Catapultes", count: 20 })
+        ])
+      }),
+      Object.freeze({
+        id: "off_terre_d",
+        label: "OFF Terre D",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 25 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Chars", count: 400 })
+        ])
+      }),
+      Object.freeze({
+        id: "off_terre_e",
+        label: "OFF Terre E",
+        units: Object.freeze([
+          Object.freeze({ name: "Bateaux-feu", count: 25 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Frondeurs", count: 1600 })
+        ])
+      })
+    ]),
+    def_terrestres: Object.freeze([
+      Object.freeze({
+        id: "def_terre_reference",
+        label: "DEF Terre (reference site)",
+        units: Object.freeze([
+          Object.freeze({ name: "Archers", count: 400 }),
+          Object.freeze({ name: "Epeistes", count: 500 }),
+          Object.freeze({ name: "Hoplites", count: 700 }),
+          Object.freeze({ name: "Transports rapides", count: 100 }),
+          Object.freeze({ name: "Biremes", count: 50 })
+        ])
+      })
+    ]),
+    generic: Object.freeze([
+      Object.freeze({
+        id: "aucune",
+        label: "Aucune compo definie",
+        units: Object.freeze([])
+      })
+    ])
+  });
+
+  const RESEARCH_LIBRARY = Object.freeze({
+    architecture: Object.freeze({
+      label: "Architecture",
+      aliases: ["architecture", "mathematics", "mathematique", "mathematiques", "ceramique", "ceramiques", "ceramics"],
+      cost: Object.freeze({ wood: 1900, stone: 2100, iron: 1300 }),
+      optimization: Object.freeze({ costFactor: 0.85 })
+    }),
+    crane: Object.freeze({
+      label: "Grue",
+      aliases: ["crane", "grue"],
+      cost: Object.freeze({ wood: 3000, stone: 1800, iron: 1400 }),
+      optimization: Object.freeze({ timeFactor: 0.85 })
+    }),
+    ram: Object.freeze({ label: "Belier", aliases: ["ram", "belier", "beliers"] }),
+    cartography: Object.freeze({ label: "Cartographie", aliases: ["cartography", "cartographie"] }),
+    berth: Object.freeze({ label: "Charrue / Couchette", aliases: ["berth", "plow", "plough", "charrue", "couchette"] }),
+    shipwright: Object.freeze({ label: "Constructeur naval", aliases: ["shipwright", "constructeur_naval"] }),
+    phalanx: Object.freeze({ label: "Phalange", aliases: ["phalanx", "phalange"] }),
+    instructor: Object.freeze({ label: "Instructeur", aliases: ["instructor", "instructeur"] }),
+    conscription: Object.freeze({ label: "Conscription", aliases: ["conscription"] }),
+    conquest: Object.freeze({ label: "Conquete", aliases: ["conquest", "conquete", "conquetes"] }),
+    colony_ship: Object.freeze({ label: "Navire de colonisation", aliases: ["colony_ship", "colonize_ship", "navire_colonisation"] }),
+    fast_transport_ship: Object.freeze({ label: "Transport rapide", aliases: ["fast_transport_ship", "fast_transporter", "transport_rapide"] }),
+    bunk: Object.freeze({ label: "Bunk", aliases: ["bunk", "bunker"] }),
+    catapult: Object.freeze({ label: "Catapulte", aliases: ["catapult", "catapulte"] }),
+    fire_ship: Object.freeze({ label: "Bateau-feu", aliases: ["fire_ship", "fireboat", "bateau_feu", "bateaux_feu"] }),
+    bireme: Object.freeze({ label: "Bireme", aliases: ["bireme", "biremes"] }),
+    archer: Object.freeze({ label: "Archer", aliases: ["archer", "archers"] }),
+    hoplite: Object.freeze({ label: "Hoplite", aliases: ["hoplite", "hoplites"] }),
+    city_guard: Object.freeze({ label: "Garde de la cite", aliases: ["city_guard", "cityguard", "guard"] }),
+    villagers_loyalty: Object.freeze({ label: "Loyaute des villageois", aliases: ["villagers_loyalty", "villager_loyalty", "loyalty"] }),
+    cryptography: Object.freeze({ label: "Cryptographie", aliases: ["cryptography", "cryptographie"] }),
+    mathematics: Object.freeze({ label: "Mathematiques", aliases: ["mathematics", "mathematiques"] })
+  });
+
+  const RESEARCH_ALIAS_TO_KEY = (() => {
+    const out = {};
+    Object.entries(RESEARCH_LIBRARY).forEach(([key, config]) => {
+      out[key] = key;
+      const aliases = Array.isArray(config.aliases) ? config.aliases : [];
+      aliases.forEach((alias) => {
+        const normalized = String(alias || "")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^a-z0-9_]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+        if (normalized) {
+          out[normalized] = key;
+        }
+      });
+    });
+    return Object.freeze(out);
+  })();
+
+  const SENATE_HIGHLIGHT_CLASS = "tm-senate-next-border";
+  const SENATE_HIGHLIGHT_CLASS_LEGACY = "tm-senate-next-goldmark";
+  const ACADEMY_HIGHLIGHT_TODO_CLASS = "tm-academy-research-todo";
+  const ACADEMY_HIGHLIGHT_REMOVE_CLASS = "tm-academy-research-remove";
+  const ACADEMY_HIGHLIGHT_DONE_CLASS = "tm-academy-research-done";
 
   let isCustomEditMode = false;
   let isQueueDetailsVisible = false;
@@ -429,6 +493,7 @@
   let refreshTimer = null;
   let lastPresetSyncScope = "";
   const levelCacheByTown = new Map();
+  const buildingMaxLevelCache = new Map();
 
   function toInt(value, fallback) {
     const n = Number(value);
@@ -485,11 +550,316 @@
   }
 
   function getDefaultPresetKey(presets) {
-    if (presets && presets.def_navale) {
-      return "def_navale";
+    if (presets && presets.full_biremes) {
+      return "full_biremes";
     }
     const first = presets ? Object.keys(presets)[0] : "";
-    return first || "def_navale";
+    return first || "full_biremes";
+  }
+
+  function normalizeSimpleText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim();
+  }
+
+  function normalizeToken(value) {
+    return String(value || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9_]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  function normalizeResearchKey(rawKey) {
+    const normalized = normalizeToken(rawKey);
+    if (!normalized) {
+      return null;
+    }
+    return RESEARCH_ALIAS_TO_KEY[normalized] || normalized;
+  }
+
+  function getResearchConfig(researchKey) {
+    const key = normalizeResearchKey(researchKey);
+    if (!key) {
+      return null;
+    }
+    return RESEARCH_LIBRARY[key] || null;
+  }
+
+  function getResearchLabel(researchKey) {
+    const config = getResearchConfig(researchKey);
+    return (config && config.label) || String(researchKey || "");
+  }
+
+  function getOptimizationResearchModifiers(activeResearches) {
+    const set = activeResearches instanceof Set ? activeResearches : new Set();
+    let costFactor = 1;
+    let timeFactor = 1;
+    const activeEffects = [];
+
+    set.forEach((key) => {
+      const config = getResearchConfig(key);
+      if (!config || !config.optimization) {
+        return;
+      }
+      const optimization = config.optimization;
+      if (Number.isFinite(optimization.costFactor) && optimization.costFactor > 0) {
+        costFactor *= optimization.costFactor;
+      }
+      if (Number.isFinite(optimization.timeFactor) && optimization.timeFactor > 0) {
+        timeFactor *= optimization.timeFactor;
+      }
+      activeEffects.push(getResearchLabel(key));
+    });
+
+    return {
+      costFactor: Math.max(0.2, costFactor),
+      timeFactor: Math.max(0.2, timeFactor),
+      activeEffects
+    };
+  }
+
+  function resolveUnitPlanPresetKey(activePresetKey, assignedPresetKey) {
+    const active = String(activePresetKey || "");
+    if (active && active !== CUSTOM_PRESET_ID && UNIT_PLAN_CATALOG[active]) {
+      return active;
+    }
+    const assigned = String(assignedPresetKey || "");
+    if (assigned && assigned !== CUSTOM_PRESET_ID && UNIT_PLAN_CATALOG[assigned]) {
+      return assigned;
+    }
+    return GENERIC_UNIT_PLAN_KEY;
+  }
+
+  function getUnitPlanStorageKeyForTown(townOverride) {
+    const town = townOverride || getTown();
+    const townIdentifier = getTownIdentifier(town);
+    if (!townIdentifier || townIdentifier === "unknown") {
+      return null;
+    }
+    const hostScope = window.location.hostname || "unknown_host";
+    return `${UNIT_PLAN_BY_TOWN_KEY_PREFIX}_${hostScope}_${townIdentifier}`;
+  }
+
+  function getUnitPlanSelectionMapForTown(townOverride) {
+    const storageKey = getUnitPlanStorageKeyForTown(townOverride);
+    if (!storageKey) {
+      return {};
+    }
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) {
+        return {};
+      }
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    } catch (_) {}
+    return {};
+  }
+
+  function saveUnitPlanSelectionMapForTown(map, townOverride) {
+    const storageKey = getUnitPlanStorageKeyForTown(townOverride);
+    if (!storageKey || !map || typeof map !== "object") {
+      return;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(map));
+  }
+
+  function getUnitPlansForPreset(presetKey) {
+    const key = String(presetKey || "");
+    const plans = UNIT_PLAN_CATALOG[key];
+    if (Array.isArray(plans) && plans.length) {
+      return plans;
+    }
+    return UNIT_PLAN_CATALOG[GENERIC_UNIT_PLAN_KEY];
+  }
+
+  function getDefaultUnitPlanIdForPreset(presetKey) {
+    const plans = getUnitPlansForPreset(presetKey);
+    const first = plans && plans[0];
+    return first ? first.id : "";
+  }
+
+  function getSelectedUnitPlanIdForTown(presetKey, townOverride) {
+    const key = resolveUnitPlanPresetKey(presetKey);
+    const plans = getUnitPlansForPreset(key);
+    const fallback = getDefaultUnitPlanIdForPreset(key);
+    const selectionMap = getUnitPlanSelectionMapForTown(townOverride);
+    const selected = selectionMap[key];
+    if (selected && plans.some((plan) => plan.id === selected)) {
+      return selected;
+    }
+    return fallback;
+  }
+
+  function setSelectedUnitPlanIdForTown(presetKey, unitPlanId, townOverride) {
+    const key = resolveUnitPlanPresetKey(presetKey);
+    const plans = getUnitPlansForPreset(key);
+    if (!plans.some((plan) => plan.id === unitPlanId)) {
+      return false;
+    }
+    const selectionMap = getUnitPlanSelectionMapForTown(townOverride);
+    selectionMap[key] = unitPlanId;
+    saveUnitPlanSelectionMapForTown(selectionMap, townOverride);
+    return true;
+  }
+
+  function getSelectedUnitPlanForTown(presetKey, townOverride) {
+    const key = resolveUnitPlanPresetKey(presetKey);
+    const plans = getUnitPlansForPreset(key);
+    const selectedId = getSelectedUnitPlanIdForTown(key, townOverride);
+    const selected = plans.find((plan) => plan.id === selectedId);
+    return selected || plans[0] || null;
+  }
+
+  function isOffTerrestresUnitPlan(unitPlan) {
+    const id = normalizeToken(unitPlan && unitPlan.id);
+    if (id && /^off_terre_/.test(id)) {
+      return true;
+    }
+    const label = normalizeSimpleText(unitPlan && unitPlan.label);
+    return /^off\s+terre/.test(label);
+  }
+
+  function isCommonOffTerrestresNavalUnit(unitName) {
+    const normalized = normalizeSimpleText(unitName);
+    return (
+      normalized === "bateaux-feu" ||
+      normalized === "bateaux feu" ||
+      normalized === "bateau-feu" ||
+      normalized === "bateau feu" ||
+      normalized === "transports rapides" ||
+      normalized === "transport rapide"
+    );
+  }
+
+  function formatUnitPlanUnits(unitPlan) {
+    const hideCommonNavalUnits = isOffTerrestresUnitPlan(unitPlan);
+    const parts = unitPlan && Array.isArray(unitPlan.units)
+      ? unitPlan.units
+          .filter((unit) => unit && unit.name)
+          .filter((unit) => !(hideCommonNavalUnits && isCommonOffTerrestresNavalUnit(unit.name)))
+          .map((unit) => `${toInt(unit.count, 0)} ${unit.name}`)
+      : [];
+    return parts.length ? parts.join(" + ") : "";
+  }
+
+  function formatUnitPlanLabel(unitPlan) {
+    if (!unitPlan) {
+      return "";
+    }
+    const label = String(unitPlan.label || "").trim();
+    const units = formatUnitPlanUnits(unitPlan);
+    if (!label) {
+      return units;
+    }
+    return units ? `${label} (${units})` : label;
+  }
+
+  function formatUnitPlanSummary(unitPlan) {
+    if (!unitPlan) {
+      return "Compo unites: -";
+    }
+    const label = formatUnitPlanLabel(unitPlan);
+    const note = unitPlan.note ? ` | ${unitPlan.note}` : "";
+    return `Compo unites: ${label || "-"}${note}`;
+  }
+
+  function resolveUnitPlanUnitKey(unitName) {
+    const normalized = normalizeSimpleText(unitName);
+    if (!normalized) {
+      return "";
+    }
+    if (/^biremes?$/.test(normalized)) {
+      return "bireme";
+    }
+    if (/^bateaux?-feu$/.test(normalized) || /^bateaux? feu$/.test(normalized)) {
+      return "fire_ship";
+    }
+    if (/^transports? rapides?$/.test(normalized) || /^transports? rapide$/.test(normalized)) {
+      return "fast_transport_ship";
+    }
+    if (/^catapultes?$/.test(normalized)) {
+      return "catapult";
+    }
+    if (/^archers?$/.test(normalized)) {
+      return "archer";
+    }
+    if (/^hoplites?$/.test(normalized)) {
+      return "hoplite";
+    }
+    if (/^navires? de colonisation$/.test(normalized)) {
+      return "colony_ship";
+    }
+    if (/^cavaliers?$/.test(normalized)) {
+      return "rider";
+    }
+    if (/^frondeurs?$/.test(normalized)) {
+      return "slinger";
+    }
+    if (/^epeistes?$/.test(normalized)) {
+      return "sword";
+    }
+    if (/^chars?$/.test(normalized)) {
+      return "chariot";
+    }
+    return normalizeToken(unitName);
+  }
+
+  function getResearchKeysForUnitKey(unitKey) {
+    const normalized = normalizeToken(unitKey);
+    switch (normalized) {
+      case "bireme":
+        return ["bireme"];
+      case "fire_ship":
+      case "fireboat":
+        return ["fire_ship"];
+      case "fast_transport_ship":
+      case "fast_transporter":
+      case "small_transporter":
+        return ["fast_transport_ship"];
+      case "catapult":
+        return ["catapult"];
+      case "archer":
+        return ["archer"];
+      case "hoplite":
+        return ["hoplite"];
+      case "colony_ship":
+      case "colonize_ship":
+        return ["colony_ship", "conquest"];
+      default:
+        return [];
+    }
+  }
+
+  function getUnitPlanProductionResearchKeys(unitPlan) {
+    if (!unitPlan || !Array.isArray(unitPlan.units)) {
+      return [];
+    }
+    const out = new Set();
+    unitPlan.units.forEach((unit) => {
+      if (!unit || !unit.name || toInt(unit.count, 0) <= 0) {
+        return;
+      }
+      const unitKey = resolveUnitPlanUnitKey(unit.name);
+      const directResearch = normalizeResearchKey(unitKey);
+      if (directResearch && getResearchConfig(directResearch)) {
+        out.add(directResearch);
+      }
+      getResearchKeysForUnitKey(unitKey).forEach((researchKey) => {
+        const normalizedResearch = normalizeResearchKey(researchKey);
+        if (normalizedResearch && getResearchConfig(normalizedResearch)) {
+          out.add(normalizedResearch);
+        }
+      });
+    });
+    return Array.from(out);
   }
 
   function getCustomTargetsStorageKey() {
@@ -600,6 +970,238 @@
     return buildPriorityOrder(merged, normalizedTargets);
   }
 
+  function getBuildingServerMaxLevel(buildingKey) {
+    const canonical = normalizeBuildingKey(buildingKey);
+    if (!canonical) {
+      return null;
+    }
+    if (buildingMaxLevelCache.has(canonical)) {
+      return buildingMaxLevelCache.get(canonical);
+    }
+
+    const entry = getBuildingDataEntry(canonical);
+    if (!entry || typeof entry !== "object") {
+      return null;
+    }
+
+    let maxLevel = pickFirstFiniteNumber(entry.max_level, entry.maxLevel, entry.max, entry.max_lvl);
+    if (maxLevel === null) {
+      const levelLikeContainers = [entry.levels, entry.level_data, entry.levels_data, entry.data_by_level, entry.per_level];
+      for (const container of levelLikeContainers) {
+        if (!container) {
+          continue;
+        }
+        if (Array.isArray(container) && container.length) {
+          maxLevel = container.length - 1;
+          break;
+        }
+        if (typeof container === "object") {
+          const numericKeys = Object.keys(container)
+            .map((key) => readLooseNumber(key))
+            .filter((value) => value !== null && value >= 0);
+          if (numericKeys.length) {
+            maxLevel = Math.max(...numericKeys);
+            break;
+          }
+        }
+      }
+    }
+
+    const normalizedMax = maxLevel === null ? null : Math.max(0, Math.floor(maxLevel));
+    if (normalizedMax !== null) {
+      buildingMaxLevelCache.set(canonical, normalizedMax);
+    }
+    return normalizedMax;
+  }
+
+  function isConquestResearchEnabledByServer() {
+    const raw = pickFirstFiniteNumber(
+      uw.GameData && uw.GameData.world && uw.GameData.world.conquest,
+      uw.GameData && uw.GameData.world && uw.GameData.world.takeover,
+      uw.GameData && uw.GameData.world && uw.GameData.world.conquest_mode
+    );
+    if (raw !== null) {
+      return raw > 0;
+    }
+
+    const text = normalizeSimpleText(
+      (uw.GameData && uw.GameData.world && (
+        uw.GameData.world.conquest ||
+        uw.GameData.world.takeover_mode ||
+        uw.GameData.world.conquest_mode_name ||
+        uw.GameData.world.conquest_mode
+      )) || ""
+    );
+    if (!text) {
+      return true;
+    }
+    if (/revolt|revolte|disabled|off|false|none/.test(text)) {
+      return false;
+    }
+    if (/conquest|classic|on|true|enabled/.test(text)) {
+      return true;
+    }
+    return true;
+  }
+
+  function clampTargetRangeToServer(range, maxLevel) {
+    const normalized = normalizeRange(range) || [0, 0];
+    if (!Number.isFinite(maxLevel)) {
+      return normalized;
+    }
+    const max = Math.max(0, Math.floor(maxLevel));
+    const minValue = Math.min(max, Math.max(0, normalized[0]));
+    const maxValue = Math.min(max, Math.max(minValue, normalized[1]));
+    return [minValue, maxValue];
+  }
+
+  function applyTargetOffset(range, minDelta, maxDelta, maxLevel) {
+    const normalized = normalizeRange(range) || [0, 0];
+    const next = [
+      Math.max(0, normalized[0] + toInt(minDelta, 0)),
+      Math.max(0, normalized[1] + toInt(maxDelta, 0))
+    ];
+    return clampTargetRangeToServer(next, maxLevel);
+  }
+
+  function getSpeedTier(worldSpeed) {
+    const speed = Number.isFinite(worldSpeed) && worldSpeed > 0 ? worldSpeed : 1;
+    if (speed >= 4) {
+      return "very_fast";
+    }
+    if (speed >= 2) {
+      return "fast";
+    }
+    if (speed <= 1) {
+      return "slow";
+    }
+    return "normal";
+  }
+
+  function getPresetTargetOffsetsByServerSpeed(presetKey, worldSpeed) {
+    const out = {};
+    const tier = getSpeedTier(worldSpeed);
+    const add = (key, minDelta, maxDelta) => {
+      if (!out[key]) {
+        out[key] = [0, 0];
+      }
+      out[key][0] += minDelta;
+      out[key][1] += maxDelta;
+    };
+
+    if (tier === "slow") {
+      add("storage", 1, 2);
+      add("market", 1, 1);
+    } else if (tier === "fast") {
+      add("storage", 2, 3);
+      add("market", 1, 2);
+      add("academy", 0, 1);
+    } else if (tier === "very_fast") {
+      add("storage", 3, 4);
+      add("market", 2, 3);
+      add("academy", 1, 1);
+      add("main", 0, 1);
+    }
+
+    const key = String(presetKey || "");
+    if (/^full_/.test(key)) {
+      add("dock", 1, 2);
+      add("market", 1, 1);
+    } else if (key === "off_terrestres") {
+      add("barracks", 1, 2);
+      add("dock", 1, 1);
+      add("market", 1, 1);
+    } else if (key === "def_terrestres") {
+      add("wall", 0, 1);
+      add("storage", 1, 1);
+    }
+
+    return out;
+  }
+
+  function adjustPresetForServerRules(presetConfig) {
+    if (!presetConfig || !presetConfig.targets || typeof presetConfig.targets !== "object") {
+      return presetConfig;
+    }
+
+    const worldSpeed = getWorldSpeedFactor();
+    const speedTier = getSpeedTier(worldSpeed);
+    const offsets = getPresetTargetOffsetsByServerSpeed(presetConfig.key, worldSpeed);
+    const adjustedTargets = ensureProductionTargets(cloneTargets(presetConfig.targets));
+    const notes = [];
+
+    Object.keys(adjustedTargets).forEach((buildingKey) => {
+      const maxLevel = getBuildingServerMaxLevel(buildingKey);
+      if (maxLevel !== null && maxLevel <= 0) {
+        delete adjustedTargets[buildingKey];
+        notes.push(`${buildingKey}: indisponible`);
+        return;
+      }
+      if (maxLevel !== null) {
+        const before = adjustedTargets[buildingKey];
+        const next = clampTargetRangeToServer(before, maxLevel);
+        adjustedTargets[buildingKey] = next;
+        if (before[0] !== next[0] || before[1] !== next[1]) {
+          notes.push(`${buildingKey}: limite serveur ${next[0]}-${next[1]}`);
+        }
+      }
+    });
+
+    Object.entries(offsets).forEach(([buildingKey, offset]) => {
+      if (!adjustedTargets[buildingKey]) {
+        return;
+      }
+      const maxLevel = getBuildingServerMaxLevel(buildingKey);
+      const before = adjustedTargets[buildingKey];
+      const after = applyTargetOffset(before, offset[0], offset[1], maxLevel);
+      adjustedTargets[buildingKey] = after;
+      if (before[0] !== after[0] || before[1] !== after[1]) {
+        notes.push(`${buildingKey}: ajuste vitesse ${after[0]}-${after[1]}`);
+      }
+    });
+
+    let recommendedResearches = Array.isArray(presetConfig.recommendedResearches)
+      ? presetConfig.recommendedResearches.slice()
+      : [];
+    if (!isConquestResearchEnabledByServer()) {
+      const beforeCount = recommendedResearches.length;
+      recommendedResearches = recommendedResearches.filter((key) => key !== "conquest" && key !== "colony_ship");
+      if (recommendedResearches.length !== beforeCount) {
+        notes.push("recherches conquete masquees (regle serveur)");
+      }
+    }
+
+    const normalizedOrder = buildPriorityOrder(
+      Array.isArray(presetConfig.priorityOrder) ? presetConfig.priorityOrder.map((key) => normalizeBuildingKey(key)) : [],
+      adjustedTargets
+    );
+
+    let special = presetConfig.specialBuilding && presetConfig.specialBuilding.key
+      ? {
+          key: normalizeBuildingKey(presetConfig.specialBuilding.key),
+          target: normalizeRange(presetConfig.specialBuilding.target)
+        }
+      : inferSpecialBuilding(adjustedTargets);
+    if (!special || !special.key || !adjustedTargets[special.key]) {
+      special = inferSpecialBuilding(adjustedTargets);
+    } else {
+      special.target = normalizeRange(adjustedTargets[special.key]) || special.target || [1, 1];
+    }
+
+    return {
+      ...presetConfig,
+      targets: adjustedTargets,
+      priorityOrder: normalizedOrder,
+      specialBuilding: special,
+      recommendedResearches,
+      serverTuning: {
+        worldSpeed,
+        speedTier,
+        notes
+      }
+    };
+  }
+
   function getCustomTargets() {
     const storageKey = getCustomTargetsStorageKey();
     try {
@@ -635,49 +1237,57 @@
     const presets = getPresetMap();
     if (presetKey === CUSTOM_PRESET_ID) {
       const targets = ensureProductionTargets(getCustomTargets());
-      return {
+      return adjustPresetForServerRules({
         key: CUSTOM_PRESET_ID,
         label: "Personnalise",
         targets,
         priorityOrder: ensureProductionPriority([], targets),
         specialBuilding: inferSpecialBuilding(targets),
+        recommendedResearches: [],
+        optimizationResearches: [],
         isCustom: true
-      };
+      });
     }
 
     if (presets[presetKey]) {
       const preset = presets[presetKey];
       const targets = ensureProductionTargets(preset.targets);
-      return {
+      return adjustPresetForServerRules({
         key: presetKey,
         label: preset.label,
         targets,
         priorityOrder: ensureProductionPriority(preset.priorityOrder, targets),
         specialBuilding: preset.specialBuilding || inferSpecialBuilding(targets),
+        recommendedResearches: Array.isArray(preset.recommendedResearches) ? preset.recommendedResearches : [],
+        optimizationResearches: Array.isArray(preset.optimizationResearches) ? preset.optimizationResearches : [],
         isCustom: false
-      };
+      });
     }
 
     const fallbackKey = getDefaultPresetKey(presets);
     const fallback = presets[fallbackKey];
     if (!fallback) {
-      return {
+      return adjustPresetForServerRules({
         key: CUSTOM_PRESET_ID,
         label: "Personnalise",
         targets: getCustomTargets(),
         priorityOrder: [],
         specialBuilding: null,
+        recommendedResearches: [],
+        optimizationResearches: [],
         isCustom: true
-      };
+      });
     }
-    return {
+    return adjustPresetForServerRules({
       key: fallbackKey,
       label: fallback.label,
       targets: ensureProductionTargets(fallback.targets),
       priorityOrder: ensureProductionPriority(fallback.priorityOrder, fallback.targets),
       specialBuilding: fallback.specialBuilding || inferSpecialBuilding(ensureProductionTargets(fallback.targets)),
+      recommendedResearches: Array.isArray(fallback.recommendedResearches) ? fallback.recommendedResearches : [],
+      optimizationResearches: Array.isArray(fallback.optimizationResearches) ? fallback.optimizationResearches : [],
       isCustom: false
-    };
+    });
   }
 
   function estimateSimplePlanTimings(tasks, levels, economy) {
@@ -1086,9 +1696,11 @@
     };
   }
 
-  function estimateUpgradeCost(buildingKey, targetLevel, cache) {
+  function estimateUpgradeCost(buildingKey, targetLevel, cache, modifiers) {
     const canonical = normalizeBuildingKey(buildingKey);
-    const cacheKey = `${canonical}:${targetLevel}`;
+    const rawCostFactor = modifiers && Number.isFinite(modifiers.costFactor) ? modifiers.costFactor : 1;
+    const safeCostFactor = rawCostFactor > 0 ? rawCostFactor : 1;
+    const cacheKey = `${canonical}:${targetLevel}:cf${safeCostFactor.toFixed(4)}`;
     if (cache && cache.has(cacheKey)) {
       return cache.get(cacheKey);
     }
@@ -1162,10 +1774,19 @@
       return null;
     }
 
+    const adjustedResult = safeCostFactor !== 1
+      ? {
+          ...result,
+          wood: Math.max(0, Math.round((result.wood || 0) * safeCostFactor)),
+          stone: Math.max(0, Math.round((result.stone || 0) * safeCostFactor)),
+          iron: Math.max(0, Math.round((result.iron || 0) * safeCostFactor))
+        }
+      : result;
+
     if (cache) {
-      cache.set(cacheKey, result);
+      cache.set(cacheKey, adjustedResult);
     }
-    return result;
+    return adjustedResult;
   }
 
   function estimateUpgradePoints(buildingKey, targetLevel, pointsCache, costCache) {
@@ -1232,11 +1853,13 @@
     return SENATE_BUILD_SPEED_PCT[clamped] || SENATE_BUILD_SPEED_PCT[1];
   }
 
-  function estimateUpgradeBuildSeconds(buildingKey, targetLevel, senateLevel, worldSpeed, cache) {
+  function estimateUpgradeBuildSeconds(buildingKey, targetLevel, senateLevel, worldSpeed, cache, modifiers) {
     const canonical = normalizeBuildingKey(buildingKey);
     const safeSenate = Math.max(1, toInt(senateLevel, 1));
     const safeWorldSpeed = worldSpeed > 0 ? worldSpeed : 1;
-    const cacheKey = `${canonical}:${targetLevel}:s${safeSenate}:w${safeWorldSpeed}`;
+    const rawTimeFactor = modifiers && Number.isFinite(modifiers.timeFactor) ? modifiers.timeFactor : 1;
+    const safeTimeFactor = rawTimeFactor > 0 ? rawTimeFactor : 1;
+    const cacheKey = `${canonical}:${targetLevel}:s${safeSenate}:w${safeWorldSpeed}:tf${safeTimeFactor.toFixed(4)}`;
     if (cache && cache.has(cacheKey)) {
       return cache.get(cacheKey);
     }
@@ -1274,7 +1897,7 @@
     }
 
     const senateFactor = getSenateConstructionPercent(safeSenate) / SENATE_BUILD_SPEED_PCT[15];
-    const adjusted = Math.max(1, baseAtSenate15 * senateFactor / safeWorldSpeed);
+    const adjusted = Math.max(1, baseAtSenate15 * senateFactor * safeTimeFactor / safeWorldSpeed);
     if (cache) {
       cache.set(cacheKey, adjusted);
     }
@@ -1482,12 +2105,12 @@
     });
   }
 
-  function computeRemainingDemand(levels, targetMaxByKey, costCache) {
+  function computeRemainingDemand(levels, targetMaxByKey, costCache, modifiers) {
     const totals = { wood: 0, stone: 0, iron: 0 };
     Object.entries(targetMaxByKey).forEach(([buildingKey, targetLevel]) => {
       const currentLevel = getLevelForBuilding(levels, buildingKey);
       for (let level = currentLevel + 1; level <= targetLevel; level += 1) {
-        const cost = estimateUpgradeCost(buildingKey, level, costCache);
+        const cost = estimateUpgradeCost(buildingKey, level, costCache, modifiers);
         if (!cost) {
           continue;
         }
@@ -1499,13 +2122,13 @@
     return totals;
   }
 
-  function computeRemainingBuildSeconds(levels, targetMaxByKey, worldSpeed, timeCache) {
+  function computeRemainingBuildSeconds(levels, targetMaxByKey, worldSpeed, timeCache, modifiers) {
     let total = 0;
     const senateLevel = getLevelForBuilding(levels, "main");
     Object.entries(targetMaxByKey).forEach(([buildingKey, targetLevel]) => {
       const currentLevel = getLevelForBuilding(levels, buildingKey);
       for (let level = currentLevel + 1; level <= targetLevel; level += 1) {
-        const seconds = estimateUpgradeBuildSeconds(buildingKey, level, senateLevel, worldSpeed, timeCache);
+        const seconds = estimateUpgradeBuildSeconds(buildingKey, level, senateLevel, worldSpeed, timeCache, modifiers);
         if (seconds && Number.isFinite(seconds)) {
           total += seconds;
         }
@@ -1514,7 +2137,7 @@
     return total;
   }
 
-  function getPriorityPlan(preset, levels, economy) {
+  function getPriorityPlan(preset, levels, economy, researchStatus) {
     const fallbackPlan = getSimplePriorityPlan(preset, levels, economy);
     if (!preset || !levels || !economy) {
       return fallbackPlan;
@@ -1587,26 +2210,64 @@
       }
     });
 
+    const activeResearches = researchStatus && researchStatus.active instanceof Set
+      ? new Set(researchStatus.active)
+      : new Set();
+    const productionResearches = Array.isArray(researchStatus && researchStatus.productionKeys)
+      ? researchStatus.productionKeys
+      : [];
+    const recommendedResearches = Array.isArray(researchStatus && researchStatus.recommendedKeys)
+      ? researchStatus.recommendedKeys
+      : [];
+    const optimizationResearches = Array.isArray(researchStatus && researchStatus.optimizationKeys)
+      ? researchStatus.optimizationKeys
+      : (Array.isArray(preset.optimizationResearches)
+          ? preset.optimizationResearches.map((key) => normalizeResearchKey(key)).filter(Boolean)
+          : []);
+
+    const researchPriorityByKey = new Map();
+    const registerResearchPriority = (researchKey, kind, bucket) => {
+      const normalized = normalizeResearchKey(researchKey);
+      if (!normalized || !getResearchConfig(normalized)) {
+        return;
+      }
+      const existing = researchPriorityByKey.get(normalized);
+      if (!existing || bucket < existing.bucket) {
+        researchPriorityByKey.set(normalized, { kind, bucket });
+      }
+    };
+    productionResearches.forEach((researchKey) => registerResearchPriority(researchKey, "production_research", 0));
+    recommendedResearches.forEach((researchKey) => registerResearchPriority(researchKey, "recommended_research", 1));
+    optimizationResearches.forEach((researchKey) => registerResearchPriority(researchKey, "optimization_research", 2));
+
+    const pendingResearches = new Set();
+    researchPriorityByKey.forEach((_, researchKey) => {
+      if (!activeResearches.has(researchKey)) {
+        pendingResearches.add(researchKey);
+      }
+    });
+
+    let researchModifiers = getOptimizationResearchModifiers(activeResearches);
     const plan = [];
     const maxIterations = 600;
 
     for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-      const pendingKeys = Object.keys(targetRangesByKey).filter((buildingKey) => {
+      const pendingBuildingKeys = Object.keys(targetRangesByKey).filter((buildingKey) => {
         const currentLevel = getLevelForBuilding(state.levels, buildingKey);
         const range = targetRangesByKey[buildingKey] || [0, 0];
         return currentLevel < range[0] || currentLevel > range[1] || currentLevel < range[1];
       });
 
-      if (!pendingKeys.length) {
+      if (!pendingBuildingKeys.length && !pendingResearches.size) {
         break;
       }
 
-      const remainingDemand = computeRemainingDemand(state.levels, targetMaxByKey, costCache);
-      const remainingBuildSeconds = computeRemainingBuildSeconds(state.levels, targetMaxByKey, worldSpeed, timeCache);
+      const remainingDemand = computeRemainingDemand(state.levels, targetMaxByKey, costCache, researchModifiers);
+      const remainingBuildSeconds = computeRemainingBuildSeconds(state.levels, targetMaxByKey, worldSpeed, timeCache, researchModifiers);
       const senateLevel = getLevelForBuilding(state.levels, "main");
       const candidates = [];
 
-      pendingKeys.forEach((buildingKey) => {
+      pendingBuildingKeys.forEach((buildingKey) => {
         const currentLevel = getLevelForBuilding(state.levels, buildingKey);
         const normalizedRange = targetRangesByKey[buildingKey] || [0, 0];
         const minTarget = normalizedRange[0];
@@ -1617,6 +2278,7 @@
             return;
           }
           candidates.push({
+            type: "building",
             key: buildingKey,
             level: currentLevel,
             nextLevel: Math.max(0, currentLevel - 1),
@@ -1643,8 +2305,8 @@
           return;
         }
 
-        const cost = estimateUpgradeCost(buildingKey, nextLevel, costCache);
-        const buildSeconds = estimateUpgradeBuildSeconds(buildingKey, nextLevel, senateLevel, worldSpeed, timeCache);
+        const cost = estimateUpgradeCost(buildingKey, nextLevel, costCache, researchModifiers);
+        const buildSeconds = estimateUpgradeBuildSeconds(buildingKey, nextLevel, senateLevel, worldSpeed, timeCache, researchModifiers);
         if (!cost || !buildSeconds || !Number.isFinite(buildSeconds)) {
           return;
         }
@@ -1688,6 +2350,37 @@
           score,
           order: orderIndex.has(buildingKey) ? orderIndex.get(buildingKey) : 9999,
           action: "upgrade",
+          excess: 0,
+          type: "building"
+        });
+      });
+
+      pendingResearches.forEach((researchKey) => {
+        const research = getResearchConfig(researchKey);
+        if (!research || !research.cost) {
+          return;
+        }
+        const waitSeconds = estimateWaitSeconds(research.cost, state.resources, state.productionPerSecond, state.storageCapacity);
+        if (!Number.isFinite(waitSeconds)) {
+          return;
+        }
+        const meta = researchPriorityByKey.get(researchKey) || { kind: "recommended_research", bucket: 1 };
+        const priorityPenaltySeconds = meta.bucket * 1800;
+        candidates.push({
+          type: "research",
+          key: `research_${researchKey}`,
+          researchKey,
+          level: 0,
+          nextLevel: 0,
+          kind: meta.kind,
+          min: 0,
+          max: 0,
+          cost: research.cost,
+          waitSeconds,
+          buildSeconds: 0,
+          score: waitSeconds + priorityPenaltySeconds,
+          order: -1,
+          action: "research",
           excess: 0
         });
       });
@@ -1697,17 +2390,27 @@
       }
 
       candidates.sort((a, b) => {
-        const getGroup = (kind) => {
+        const getGroup = (candidate) => {
+          const kind = candidate && candidate.kind;
           if (kind === "required_downgrade") {
             return 0;
           }
-          if (kind === "required") {
+          if (kind === "required" || kind === "production_research") {
             return 1;
           }
-          return 2;
+          if (kind === "recommended_research") {
+            return 3;
+          }
+          if (kind === "optional") {
+            return 3;
+          }
+          if (kind === "optimization_research") {
+            return 4;
+          }
+          return 5;
         };
-        const aGroup = getGroup(a.kind);
-        const bGroup = getGroup(b.kind);
+        const aGroup = getGroup(a);
+        const bGroup = getGroup(b);
         if (aGroup !== bGroup) {
           return aGroup - bGroup;
         }
@@ -1733,12 +2436,51 @@
         if (a.order !== b.order) {
           return a.order - b.order;
         }
-        const aLabel = BUILDING_LABELS[a.key] || a.key;
-        const bLabel = BUILDING_LABELS[b.key] || b.key;
+        const aLabel = a.type === "research"
+          ? getResearchLabel(a.researchKey || a.key)
+          : (BUILDING_LABELS[a.key] || a.key);
+        const bLabel = b.type === "research"
+          ? getResearchLabel(b.researchKey || b.key)
+          : (BUILDING_LABELS[b.key] || b.key);
         return aLabel.localeCompare(bLabel, "fr");
       });
 
       const chosen = candidates[0];
+      if (chosen.type === "research") {
+        const waitSeconds = Math.max(0, Number(chosen.waitSeconds) || 0);
+        if (waitSeconds > 0) {
+          advanceResources(state.resources, state.productionPerSecond, waitSeconds, state.storageCapacity);
+        }
+        RESOURCE_KEYS.forEach((resourceKey) => {
+          state.resources[resourceKey] = Math.max(0, (state.resources[resourceKey] || 0) - (chosen.cost[resourceKey] || 0));
+        });
+        state.elapsedSeconds += waitSeconds;
+        if (chosen.researchKey) {
+          activeResearches.add(chosen.researchKey);
+          pendingResearches.delete(chosen.researchKey);
+          researchModifiers = getOptimizationResearchModifiers(activeResearches);
+        }
+        plan.push({
+          type: "research",
+          key: chosen.key,
+          researchKey: chosen.researchKey,
+          kind: chosen.kind || "required_research",
+          action: "research",
+          level: 0,
+          targetLevel: 0,
+          min: 0,
+          max: 0,
+          gap: 0,
+          order: -1,
+          waitSeconds,
+          buildSeconds: 0,
+          finishSeconds: state.elapsedSeconds,
+          cost: chosen.cost,
+          simulated: true
+        });
+        continue;
+      }
+
       const isDowngrade = chosen.action === "downgrade";
       const duration = isDowngrade ? 0 : (chosen.waitSeconds + chosen.buildSeconds);
       if (!isDowngrade) {
@@ -1793,7 +2535,10 @@
       });
     }
 
-    return plan.length ? plan : fallbackPlan;
+    if (plan.length) {
+      return plan;
+    }
+    return fallbackPlan;
   }
 
   function getPresetStorageKeyForTown(townOverride) {
@@ -1950,6 +2695,790 @@
 
     pushUnique(getIconUrl(canonical));
     return out;
+  }
+
+  function isVisibleElement(element) {
+    if (!element || !(element instanceof HTMLElement)) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (!style) {
+      return false;
+    }
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function getSenateRoots() {
+    const selectors = [
+      "[id^='gpwnd_'] .main.window_background",
+      ".main.window_background",
+      "#building_main",
+      "[data-window-type='building_main']",
+      "[class*='main_window']"
+    ];
+    const roots = [];
+    const seen = new Set();
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (!(node instanceof HTMLElement) || !isVisibleElement(node) || seen.has(node)) {
+          return;
+        }
+        const hasUpgradeButtons = Boolean(
+          node.querySelector("a[onclick*=\"BuildingMain.buildBuilding(\"]") ||
+          node.querySelector("a.button_build.build_up") ||
+          node.querySelector(".button_build.build_up")
+        );
+        if (!hasUpgradeButtons) {
+          return;
+        }
+        seen.add(node);
+        roots.push(node);
+      });
+    });
+    return roots;
+  }
+
+  function findRowsForBuildingInSenate(buildingKey, roots) {
+    const aliases = getAliasesForBuilding(buildingKey);
+    const selectors = [];
+    aliases.forEach((alias) => {
+      selectors.push(`#building_${alias}`);
+      selectors.push(`[id="building_${alias}"]`);
+      selectors.push(`[data-building="${alias}"]`);
+      selectors.push(`[data-building_type="${alias}"]`);
+      selectors.push(`[data-building-key="${alias}"]`);
+      selectors.push(`.building_${alias}`);
+      selectors.push(`.${alias}.building`);
+    });
+
+    const rows = [];
+    const seen = new Set();
+    roots.forEach((root) => {
+      selectors.forEach((selector) => {
+        root.querySelectorAll(selector).forEach((row) => {
+          if (!(row instanceof HTMLElement) || !isVisibleElement(row) || seen.has(row)) {
+            return;
+          }
+          seen.add(row);
+          rows.push(row);
+        });
+      });
+    });
+    return rows;
+  }
+
+  function findUpgradeButtonInSenateRow(row) {
+    if (!row) {
+      return null;
+    }
+    const candidates = Array.from(row.querySelectorAll("a, button, .button_new"));
+    if (!candidates.length) {
+      return null;
+    }
+
+    const preferred = candidates.find((node) => {
+      if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+        return false;
+      }
+      const className = String(node.className || "");
+      const text = normalizeSimpleText(node.textContent);
+      const looksUpgradeClass = /upgrade|build|construction|amelior|improve/i.test(className);
+      const looksUpgradeText = /amelior|amlior|upgrade|construire|build/.test(text);
+      const blocked = /disabled|inactive|grayed|locked|btn_instant_buy|instant_buy/i.test(className);
+      return (looksUpgradeClass || looksUpgradeText) && !blocked;
+    });
+    if (preferred) {
+      return preferred;
+    }
+
+    return candidates.find((node) => {
+      if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+        return false;
+      }
+      return !/disabled|inactive|grayed|locked/i.test(String(node.className || ""));
+    }) || null;
+  }
+
+  function getUpgradeButtonsInSenate(roots) {
+    const selectors = [
+      ".button_build.build_up",
+      "a.button_build.build_up",
+      "a.button_build.build_up.build.small",
+      "a[onclick*=\"BuildingMain.buildBuilding(\"]"
+    ];
+    const out = [];
+    const seen = new Set();
+    const scopes = Array.isArray(roots) && roots.length ? roots : [document.body];
+    scopes.forEach((scope) => {
+      selectors.forEach((selector) => {
+        scope.querySelectorAll(selector).forEach((node) => {
+          if (!(node instanceof HTMLElement) || !isVisibleElement(node) || seen.has(node)) {
+            return;
+          }
+          seen.add(node);
+          out.push(node);
+        });
+      });
+    });
+    return out;
+  }
+
+  function resolveKnownBuildingKey(raw) {
+    if (!raw) {
+      return null;
+    }
+    const normalized = normalizeBuildingKey(raw);
+    return KNOWN_BUILDING_KEYS.includes(normalized) ? normalized : null;
+  }
+
+  function extractBuildingKeyFromText(rawText) {
+    if (typeof rawText !== "string" || !rawText.trim()) {
+      return null;
+    }
+
+    const direct = resolveKnownBuildingKey(rawText.trim());
+    if (direct) {
+      return direct;
+    }
+
+    const buildingMatch = rawText.match(/building[_:-]?([a-z_]+)/i);
+    if (buildingMatch && buildingMatch[1]) {
+      const byMatch = resolveKnownBuildingKey(buildingMatch[1]);
+      if (byMatch) {
+        return byMatch;
+      }
+    }
+
+    const tokens = rawText.split(/[^a-z_]+/i).filter(Boolean);
+    for (const token of tokens) {
+      const byToken = resolveKnownBuildingKey(token);
+      if (byToken) {
+        return byToken;
+      }
+    }
+
+    return null;
+  }
+
+  function extractUpgradeBuildingKeyFromButton(button) {
+    if (!button || !(button instanceof HTMLElement)) {
+      return null;
+    }
+    const onClickText = String(button.getAttribute("onclick") || "");
+    const match = onClickText.match(/BuildingMain\.buildBuilding\(\s*['"]([^'"]+)['"]/i);
+    if (match && match[1]) {
+      return normalizeBuildingKey(match[1]);
+    }
+
+    const dataCandidates = [
+      button.getAttribute("data-building"),
+      button.getAttribute("data-building_type"),
+      button.getAttribute("data-building-key"),
+      button.getAttribute("name"),
+      button.getAttribute("rel")
+    ];
+    for (const candidate of dataCandidates) {
+      const key = extractBuildingKeyFromText(String(candidate || ""));
+      if (key) {
+        return key;
+      }
+    }
+
+    const row = button.closest("[id^='building_'], [data-building], [data-building_type], [data-building-key], [class*='building_']");
+    if (row) {
+      const rowCandidates = [
+        row.getAttribute("id"),
+        row.getAttribute("data-building"),
+        row.getAttribute("data-building_type"),
+        row.getAttribute("data-building-key"),
+        row.className
+      ];
+      for (const candidate of rowCandidates) {
+        const key = extractBuildingKeyFromText(String(candidate || ""));
+        if (key) {
+          return key;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function findStepOneUpgradeButton(step, roots) {
+    if (!step || !step.key) {
+      return null;
+    }
+    const aliases = new Set(getAliasesForBuilding(step.key).map((key) => normalizeBuildingKey(key)));
+    const buttons = getUpgradeButtonsInSenate(roots);
+    return buttons.find((button) => {
+      const buttonKey = extractUpgradeBuildingKeyFromButton(button);
+      return buttonKey && aliases.has(buttonKey);
+    }) || null;
+  }
+
+  function clearSenateNextHighlight() {
+    const staleOverlay = document.getElementById("tm-senate-next-gold-overlay");
+    if (staleOverlay) {
+      staleOverlay.remove();
+    }
+    const nodes = document.querySelectorAll(
+      `.${SENATE_HIGHLIGHT_CLASS}, .${SENATE_HIGHLIGHT_CLASS_LEGACY}, .tm-senate-next-highlight`
+    );
+    nodes.forEach((node) => {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+      node.classList.remove(SENATE_HIGHLIGHT_CLASS);
+      node.classList.remove(SENATE_HIGHLIGHT_CLASS_LEGACY);
+      node.classList.remove("tm-senate-next-highlight");
+    });
+  }
+
+  function markButtonAsHighlighted(button) {
+    if (!button || !(button instanceof HTMLElement)) {
+      return;
+    }
+    button.classList.add(SENATE_HIGHLIGHT_CLASS);
+  }
+
+  function clearAcademyResearchHighlights() {
+    const selector = [
+      `.${ACADEMY_HIGHLIGHT_TODO_CLASS}`,
+      `.${ACADEMY_HIGHLIGHT_REMOVE_CLASS}`,
+      `.${ACADEMY_HIGHLIGHT_DONE_CLASS}`
+    ].join(", ");
+    document.querySelectorAll(selector).forEach((node) => {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+      node.classList.remove(ACADEMY_HIGHLIGHT_TODO_CLASS);
+      node.classList.remove(ACADEMY_HIGHLIGHT_REMOVE_CLASS);
+      node.classList.remove(ACADEMY_HIGHLIGHT_DONE_CLASS);
+    });
+  }
+
+  function resolveKnownResearchKey(raw) {
+    const normalized = normalizeResearchKey(raw);
+    if (!normalized) {
+      return null;
+    }
+    return getResearchConfig(normalized) ? normalized : null;
+  }
+
+  function extractResearchKeyFromText(rawText) {
+    if (typeof rawText !== "string") {
+      return null;
+    }
+    const text = rawText.trim().slice(0, 240);
+    if (!text) {
+      return null;
+    }
+
+    const direct = resolveKnownResearchKey(text);
+    if (direct) {
+      return direct;
+    }
+
+    const aliasPatterns = [
+      /\bresearch[_:-]?([a-z0-9_]+)/ig,
+      /\btech(?:nology)?[_:-]?([a-z0-9_]+)/ig
+    ];
+    for (const pattern of aliasPatterns) {
+      let match = null;
+      while ((match = pattern.exec(text)) !== null) {
+        const key = resolveKnownResearchKey(match[1]);
+        if (key) {
+          return key;
+        }
+      }
+    }
+
+    const tokens = text.split(/[^a-z0-9_]+/i).filter(Boolean);
+    for (const token of tokens) {
+      const key = resolveKnownResearchKey(token);
+      if (key) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  function getResearchKeyCandidatesFromElement(element) {
+    if (!element || !(element instanceof HTMLElement)) {
+      return [];
+    }
+    return [
+      element.getAttribute("data-research"),
+      element.getAttribute("data-research-key"),
+      element.getAttribute("data-research_key"),
+      element.getAttribute("data-tech"),
+      element.getAttribute("data-tech-key"),
+      element.getAttribute("data-type"),
+      element.getAttribute("name"),
+      element.getAttribute("rel"),
+      element.getAttribute("id"),
+      element.getAttribute("onclick"),
+      element.className,
+      element.textContent
+    ];
+  }
+
+  function extractResearchKeyFromElement(element) {
+    if (!element || !(element instanceof HTMLElement)) {
+      return null;
+    }
+
+    const onClickText = String(element.getAttribute("onclick") || "");
+    const onClickMatch = onClickText.match(
+      /(?:research|setResearch|resetResearch|revertResearch|cancelResearch)\s*\(\s*['"]([^'"]+)['"]/i
+    );
+    if (onClickMatch && onClickMatch[1]) {
+      const keyFromOnClick = resolveKnownResearchKey(onClickMatch[1]);
+      if (keyFromOnClick) {
+        return keyFromOnClick;
+      }
+    }
+
+    const probeValues = [
+      ...getResearchKeyCandidatesFromElement(element),
+      ...getResearchKeyCandidatesFromElement(
+        element.closest("[data-research], [data-research-key], [data-research_key], [data-tech], [id*='research'], [class*='research']")
+      )
+    ];
+    for (const value of probeValues) {
+      const key = extractResearchKeyFromText(String(value || ""));
+      if (key) {
+        return key;
+      }
+    }
+    return null;
+  }
+
+  function getAcademyRoots() {
+    const selectors = [
+      "#building_academy",
+      "[data-window-type='building_academy']",
+      "[id^='gpwnd_'] .academy.window_background",
+      ".academy.window_background",
+      "[id^='gpwnd_'] [class*='academy']",
+      "[id^='gpwnd_'] .window_content",
+      ".window_content"
+    ];
+    const roots = [];
+    const seen = new Set();
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (!(node instanceof HTMLElement) || seen.has(node) || !isVisibleElement(node) || node.closest(`#${PANEL_ID}`)) {
+          return;
+        }
+        const researchNodes = node.querySelectorAll(
+          "[onclick*='research'], [onclick*='Research'], [data-research], [data-research-key], [data-research_key], [data-tech], [id*='research'], [class*='research_'], [class*='technology_']"
+        );
+        const hasResearchContent = researchNodes.length > 0 && Boolean(
+          node.querySelector(
+            "[class*='academy'], #building_academy, [data-window-type='building_academy'], [class*='research'], [class*='technology']"
+          )
+        );
+        if (!hasResearchContent) {
+          return;
+        }
+        seen.add(node);
+        roots.push(node);
+      });
+    });
+    return roots;
+  }
+
+  function getAcademyHighlightTarget(element, root) {
+    if (!element || !root) {
+      return null;
+    }
+    const candidates = [
+      element.closest(".research_box"),
+      element.closest(".research"),
+      element.closest(".research_item"),
+      element.closest(".technology"),
+      element.closest(".tech_tree_item"),
+      element.closest(".button_new"),
+      element.closest("a"),
+      element.closest("button"),
+      element.closest("li"),
+      element.closest("tr"),
+      element
+    ];
+    for (const candidate of candidates) {
+      if (!(candidate instanceof HTMLElement)) {
+        continue;
+      }
+      if (candidate === root || !root.contains(candidate)) {
+        continue;
+      }
+      if (!isVisibleElement(candidate)) {
+        continue;
+      }
+      return candidate;
+    }
+    return null;
+  }
+
+  function getResearchAliasTokens(researchKey) {
+    const resolved = resolveKnownResearchKey(researchKey);
+    if (!resolved) {
+      return [];
+    }
+    const config = getResearchConfig(resolved);
+    const rawAliases = [resolved].concat(Array.isArray(config && config.aliases) ? config.aliases : []);
+    const tokens = [];
+    rawAliases.forEach((alias) => {
+      const token = normalizeToken(alias);
+      if (token && !tokens.includes(token)) {
+        tokens.push(token);
+      }
+    });
+    return tokens;
+  }
+
+  function findAcademyTargetsByAliases(researchKey, roots) {
+    const targets = new Set();
+    const aliasTokens = getResearchAliasTokens(researchKey);
+    if (!aliasTokens.length || !roots.length) {
+      return targets;
+    }
+
+    roots.forEach((root) => {
+      aliasTokens.forEach((token) => {
+        const exactSelectors = [
+          `#research_${token}`,
+          `[id="research_${token}"]`,
+          `[data-research="${token}"]`,
+          `[data-research-key="${token}"]`,
+          `[data-research_key="${token}"]`,
+          `[data-tech="${token}"]`,
+          `[data-tech-key="${token}"]`,
+          `[name="${token}"]`,
+          `[rel="${token}"]`,
+          `.research_${token}`,
+          `.technology_${token}`,
+          `.${token}`
+        ];
+        exactSelectors.forEach((selector) => {
+          root.querySelectorAll(selector).forEach((node) => {
+            if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+              return;
+            }
+            const target = getAcademyHighlightTarget(node, root);
+            if (target) {
+              targets.add(target);
+            }
+          });
+        });
+
+        const broadSelectors = [
+          `[onclick*="${token}"]`,
+          `[id*="${token}"]`,
+          `[class*="${token}"]`
+        ];
+        broadSelectors.forEach((selector) => {
+          root.querySelectorAll(selector).forEach((node) => {
+            if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+              return;
+            }
+            const parsedKey = extractResearchKeyFromElement(node);
+            if (parsedKey !== researchKey) {
+              return;
+            }
+            const target = getAcademyHighlightTarget(node, root);
+            if (target) {
+              targets.add(target);
+            }
+          });
+        });
+      });
+    });
+
+    return targets;
+  }
+
+  function findAcademyTargetsByText(researchKey, roots) {
+    const targets = new Set();
+    if (!roots.length) {
+      return targets;
+    }
+    const config = getResearchConfig(researchKey);
+    const needles = [config && config.label, researchKey]
+      .concat(Array.isArray(config && config.aliases) ? config.aliases : [])
+      .map((value) => normalizeSimpleText(value))
+      .filter((value) => value && value.length >= 4);
+    if (!needles.length) {
+      return targets;
+    }
+
+    roots.forEach((root) => {
+      const candidates = root.querySelectorAll(
+        ".research_box, .research, .research_item, .technology, .tech_tree_item, [onclick], [title], [data-tooltip], a, button"
+      );
+      candidates.forEach((node) => {
+        if (!(node instanceof HTMLElement) || !isVisibleElement(node)) {
+          return;
+        }
+        const text = normalizeSimpleText([
+          node.textContent || "",
+          node.getAttribute("title") || "",
+          node.getAttribute("data-tooltip") || "",
+          node.getAttribute("onclick") || "",
+          node.className || "",
+          node.getAttribute("id") || ""
+        ].join(" "));
+        if (!text) {
+          return;
+        }
+        if (!needles.some((needle) => text.includes(needle))) {
+          return;
+        }
+        const target = getAcademyHighlightTarget(node, root);
+        if (target) {
+          targets.add(target);
+        }
+      });
+    });
+
+    return targets;
+  }
+
+  function findAcademyTargetsForResearchKey(researchKey, roots) {
+    const byAlias = findAcademyTargetsByAliases(researchKey, roots);
+    if (byAlias.size) {
+      return byAlias;
+    }
+    return findAcademyTargetsByText(researchKey, roots);
+  }
+
+  function isAcademyResearchTargetDone(target) {
+    if (!target || !(target instanceof HTMLElement)) {
+      return false;
+    }
+
+    const sampleNodes = [target].concat(
+      Array.from(target.querySelectorAll("*")).slice(0, 40).filter((node) => node instanceof HTMLElement)
+    );
+    const rawSignals = sampleNodes.map((node) => [
+      node.className || "",
+      node.getAttribute("data-state") || "",
+      node.getAttribute("data-status") || "",
+      node.getAttribute("title") || "",
+      node.getAttribute("aria-label") || "",
+      node.getAttribute("data-tooltip") || "",
+      node.getAttribute("onclick") || "",
+      node.getAttribute("data-action") || ""
+    ].join(" "));
+    rawSignals.push(target.textContent || "");
+    const signals = normalizeSimpleText(rawSignals.join(" | "));
+    if (!signals) {
+      return false;
+    }
+
+    const classSignals = normalizeSimpleText(sampleNodes.map((node) => String(node.className || "")).join(" "));
+
+    const strongDoneClassPatterns = [
+      /\balready[_\s-]?researched\b/,
+      /\bis[_\s-]?researched\b/,
+      /\bresearch[_\s-]?done\b/,
+      /\bresearch[_\s-]?completed\b/,
+      /\bcompleted\b/,
+      /\bdone\b/,
+      /\bchecked\b/
+    ];
+    if (strongDoneClassPatterns.some((pattern) => pattern.test(classSignals))) {
+      return true;
+    }
+
+    const strongDoneActionPatterns = [
+      /\breset[_\s-]?research\b/,
+      /\brevert[_\s-]?research\b/,
+      /\bcancel[_\s-]?research\b/,
+      /\bunlearn[_\s-]?research\b/
+    ];
+    if (strongDoneActionPatterns.some((pattern) => pattern.test(signals))) {
+      return true;
+    }
+
+    const donePatterns = [
+      /\bis_?researched\b/,
+      /\balready[_\s-]?researched\b/,
+      /\bresearched\b/,
+      /\bcompleted\b/,
+      /\bdone\b/,
+      /\bfinished\b/,
+      /\bterminee?\b/,
+      /\beffectuee?\b/,
+      /\bacquise?\b/,
+      /\bchecked\b/,
+      /\bcheckmark\b/,
+      /\btick\b/
+    ];
+    const explicitNotDonePatterns = [
+      /\bnot[_\s-]?researched\b/,
+      /\bnot researched\b/,
+      /\bresearchable\b/,
+      /\bcan[_\s-]?research\b/,
+      /\ba[_\s-]?faire\b/,
+      /\btodo\b/
+    ];
+
+    const hasDoneHint = donePatterns.some((pattern) => pattern.test(signals));
+    const hasExplicitNotDoneHint = explicitNotDonePatterns.some((pattern) => pattern.test(signals));
+
+    if (hasDoneHint && !hasExplicitNotDoneHint) {
+      return true;
+    }
+
+    // Some academy widgets expose done researches as inactive/disabled tiles without textual "done".
+    const hasPassiveStateHint = /\block(?:ed)?\b|\binactive\b|\bdisabled\b/.test(signals);
+    const hasStartResearchAction = /\bset[_\s-]?research\b|\bresearch\s*\(/.test(signals)
+      && !strongDoneActionPatterns.some((pattern) => pattern.test(signals));
+    if (!hasDoneHint && hasPassiveStateHint && !hasStartResearchAction && !hasExplicitNotDoneHint) {
+      return true;
+    }
+
+    if (hasDoneHint && hasExplicitNotDoneHint) {
+      return !/\bnot[_\s-]?researched\b/.test(signals);
+    }
+
+    return false;
+  }
+
+  function highlightAcademyResearches(researchStatus) {
+    clearAcademyResearchHighlights();
+    const activeResearches = researchStatus && researchStatus.active instanceof Set
+      ? researchStatus.active
+      : new Set();
+    const recommendedResearches = new Set(
+      Array.isArray(researchStatus && researchStatus.recommendedKeys)
+        ? researchStatus.recommendedKeys
+        : []
+    );
+    if (!activeResearches.size && !recommendedResearches.size) {
+      return;
+    }
+
+    const roots = getAcademyRoots();
+    if (!roots.length) {
+      return;
+    }
+
+    const interestingResearches = new Set([...recommendedResearches, ...activeResearches]);
+    interestingResearches.forEach((researchKey) => {
+      const targets = findAcademyTargetsForResearchKey(researchKey, roots);
+      if (!targets.size) {
+        return;
+      }
+      const isDoneFromDom = Array.from(targets).some((node) => isAcademyResearchTargetDone(node));
+      const isDone = activeResearches.has(researchKey) || isDoneFromDom;
+      let stateClass = "";
+      if (recommendedResearches.has(researchKey)) {
+        stateClass = isDone
+          ? ACADEMY_HIGHLIGHT_DONE_CLASS
+          : ACADEMY_HIGHLIGHT_TODO_CLASS;
+      } else if (isDone) {
+        stateClass = ACADEMY_HIGHLIGHT_REMOVE_CLASS;
+      }
+      if (!stateClass) {
+        return;
+      }
+      targets.forEach((node) => {
+        if (node instanceof HTMLElement) {
+          node.classList.add(stateClass);
+        }
+      });
+    });
+  }
+
+  function isResearchPlanStep(step) {
+    if (!step) {
+      return false;
+    }
+    return (
+      step.type === "research" ||
+      step.action === "research" ||
+      step.kind === "required_research" ||
+      step.kind === "production_research" ||
+      step.kind === "recommended_research" ||
+      step.kind === "optimization_research"
+    );
+  }
+
+  function getResearchStepTag(step) {
+    if (!isResearchPlanStep(step)) {
+      return "recherche";
+    }
+    if (step.kind === "production_research") {
+      return "production";
+    }
+    if (step.kind === "recommended_research") {
+      return "recommandee";
+    }
+    if (step.kind === "optimization_research") {
+      return "optimisation";
+    }
+    return "recherche";
+  }
+
+  function getResearchStepStateClass(step) {
+    const tag = getResearchStepTag(step);
+    if (tag === "production") {
+      return "tm-low";
+    }
+    return "tm-mid";
+  }
+
+  function isDowngradePlanStep(step) {
+    if (!step) {
+      return false;
+    }
+    const fromLevel = toInt(step.level, 0);
+    const toLevel = toInt(step.targetLevel, fromLevel + 1);
+    return step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel;
+  }
+
+  function highlightSenateNextUpgradeButton(step) {
+    clearSenateNextHighlight();
+    if (!step || !step.key) {
+      return;
+    }
+    const isDowngrade = isDowngradePlanStep(step);
+    if (isDowngrade) {
+      return;
+    }
+
+    const roots = getSenateRoots();
+    const searchRoots = roots.length
+      ? Array.from(new Set([...roots, document.body]))
+      : [document.body];
+    const targetButton = findStepOneUpgradeButton(step, searchRoots);
+    const applyHighlight = (button) => {
+      if (!button) {
+        return;
+      }
+      markButtonAsHighlighted(button);
+    };
+    if (!targetButton) {
+      const rows = findRowsForBuildingInSenate(step.key, searchRoots);
+      if (!rows.length) {
+        return;
+      }
+      const fallbackButton = rows.map((row) => findUpgradeButtonInSenateRow(row)).find(Boolean);
+      if (!fallbackButton) {
+        return;
+      }
+      applyHighlight(fallbackButton);
+      return;
+    }
+
+    applyHighlight(targetButton);
   }
 
   function getTown() {
@@ -2397,6 +3926,190 @@
         }
       });
     }
+  }
+
+  function isResearchValueActive(value) {
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (value && typeof value === "object") {
+      const nested = pickFirstFiniteNumber(
+        value.researched,
+        value.completed,
+        value.done,
+        value.active,
+        value.value,
+        value.level
+      );
+      if (nested !== null) {
+        return nested > 0;
+      }
+      return Boolean(value.researched || value.completed || value.done || value.active);
+    }
+    const parsed = readLooseNumber(value);
+    return parsed !== null ? parsed > 0 : Boolean(value);
+  }
+
+  function collectResearchKeysFromRecord(record, out) {
+    if (!record || typeof record !== "object" || !(out instanceof Set)) {
+      return;
+    }
+    Object.entries(record).forEach(([rawKey, value]) => {
+      const key = normalizeResearchKey(rawKey);
+      const config = key ? getResearchConfig(key) : null;
+      if (!key || !config) {
+        return;
+      }
+      if (isResearchValueActive(value)) {
+        out.add(key);
+      }
+    });
+  }
+
+  function collectResearchKeysFromSource(source, out) {
+    if (!source || !(out instanceof Set)) {
+      return;
+    }
+    if (Array.isArray(source)) {
+      source.forEach((entry) => collectResearchKeysFromSource(entry, out));
+      return;
+    }
+    if (typeof source.toArray === "function") {
+      try {
+        const list = source.toArray();
+        if (Array.isArray(list)) {
+          list.forEach((entry) => collectResearchKeysFromSource(entry, out));
+        }
+      } catch (_) {}
+    }
+    if (source.models && Array.isArray(source.models)) {
+      source.models.forEach((entry) => collectResearchKeysFromSource(entry, out));
+    }
+
+    const attrs = source.attributes && typeof source.attributes === "object"
+      ? source.attributes
+      : source;
+    collectResearchKeysFromRecord(attrs, out);
+
+    if (source.researches && typeof source.researches === "object") {
+      collectResearchKeysFromRecord(source.researches, out);
+    }
+
+    if (typeof source.get === "function") {
+      Object.keys(RESEARCH_LIBRARY).forEach((researchKey) => {
+        try {
+          if (isResearchValueActive(source.get(researchKey))) {
+            out.add(researchKey);
+          }
+        } catch (_) {}
+      });
+    }
+  }
+
+  function extractTownResearchKeys(town) {
+    const out = new Set();
+    if (!town) {
+      return out;
+    }
+
+    try {
+      if (typeof town.researches === "function") {
+        collectResearchKeysFromSource(town.researches(), out);
+      }
+    } catch (_) {}
+
+    try {
+      if (town.attributes && typeof town.attributes === "object") {
+        collectResearchKeysFromSource(town.attributes.researches, out);
+        collectResearchKeysFromSource(town.attributes.research, out);
+      }
+    } catch (_) {}
+
+    try {
+      if (town.town_model && typeof town.town_model.get === "function") {
+        collectResearchKeysFromSource(town.town_model.get("researches"), out);
+        collectResearchKeysFromSource(town.town_model.get("research"), out);
+      }
+    } catch (_) {}
+
+    const townId = getTownNumericId(town);
+    const modelSources = [];
+    const collectionNames = ["TownResearches", "Researches", "ResearchState", "ResearchStates"];
+
+    try {
+      if (uw.MM) {
+        collectionNames.forEach((name) => {
+          try {
+            if (typeof uw.MM.getOnlyCollectionByName === "function") {
+              pushCollectionModels(modelSources, uw.MM.getOnlyCollectionByName(name));
+            }
+          } catch (_) {}
+          try {
+            const playerId = uw.Game && uw.Game.player_id;
+            if (typeof uw.MM.getOnlyCollectionByNameAndPlayerId === "function" && playerId !== undefined && playerId !== null) {
+              pushCollectionModels(modelSources, uw.MM.getOnlyCollectionByNameAndPlayerId(name, playerId));
+            }
+          } catch (_) {}
+        });
+      }
+    } catch (_) {}
+
+    modelSources.forEach((model) => {
+      const attrs = model && model.attributes && typeof model.attributes === "object"
+        ? model.attributes
+        : model;
+      if (!attrs || typeof attrs !== "object") {
+        return;
+      }
+      const modelTownId = pickFirstFiniteNumber(attrs.town_id, attrs.townId, attrs.tid);
+      if (townId !== null && modelTownId !== null && Number(modelTownId) !== townId) {
+        return;
+      }
+
+      collectResearchKeysFromSource(model, out);
+
+      const directKey = normalizeResearchKey(attrs.research_type || attrs.research || attrs.name || attrs.tech);
+      if (!directKey || !getResearchConfig(directKey)) {
+        return;
+      }
+      const explicitStatus = pickFirstFiniteNumber(attrs.researched, attrs.completed, attrs.done, attrs.active);
+      if (explicitStatus === null || explicitStatus > 0) {
+        out.add(directKey);
+      }
+    });
+
+    return out;
+  }
+
+  function getPresetResearchStatus(preset, activeResearches, unitPlan) {
+    const active = activeResearches instanceof Set ? activeResearches : new Set();
+    const normalizeList = (list) => Array.from(new Set(
+      (Array.isArray(list) ? list : [])
+        .map((key) => normalizeResearchKey(key))
+        .filter((key) => Boolean(key) && Boolean(getResearchConfig(key)))
+    ));
+
+    const productionKeys = normalizeList(getUnitPlanProductionResearchKeys(unitPlan));
+    const presetRecommendedKeys = normalizeList(preset && preset.recommendedResearches);
+    const recommendedKeys = normalizeList([...presetRecommendedKeys, ...productionKeys]);
+    const optimizationKeys = normalizeList(
+      (preset && preset.optimizationResearches) ||
+      recommendedKeys.filter((key) => {
+        const config = getResearchConfig(key);
+        return config && config.optimization;
+      })
+    );
+
+    return {
+      active,
+      productionKeys,
+      presetRecommendedKeys,
+      recommendedKeys,
+      optimizationKeys,
+      missingProductionKeys: productionKeys.filter((key) => !active.has(key)),
+      missingRecommendedKeys: recommendedKeys.filter((key) => !active.has(key)),
+      missingOptimizationKeys: optimizationKeys.filter((key) => !active.has(key))
+    };
   }
 
   function extractOrderFromRawModel(raw, townId, levels, strictTownFilter, sourceIndex) {
@@ -3295,16 +5008,19 @@
       if (!step) {
         return;
       }
-      const buildingName = BUILDING_LABELS[step.key] || String(step.key || "");
+      const isResearchStep = isResearchPlanStep(step);
+      const buildingName = isResearchStep
+        ? `Academie (${getResearchLabel(step.researchKey || step.key)})`
+        : (BUILDING_LABELS[step.key] || String(step.key || ""));
       maxBuildingChars = Math.max(maxBuildingChars, buildingName.length);
 
       const fromLevel = Math.max(0, toInt(step.level, 0));
       const toLevel = Math.max(0, toInt(step.targetLevel, fromLevel + 1));
-      const isDowngrade = step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel;
-      const tag = isDowngrade
-        ? "deconstruction"
-        : (step.kind === "required" ? "obligatoire" : "optimisation");
-      const actionText = `Niv ${fromLevel} -> ${toLevel} (${tag})`;
+      const isDowngrade = !isResearchStep && (step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel);
+      const researchTag = isResearchStep ? getResearchStepTag(step) : "";
+      const actionText = isResearchStep
+        ? `Recherche ${getResearchLabel(step.researchKey || step.key)} (${researchTag})`
+        : `Niv ${fromLevel} -> ${toLevel} (${isDowngrade ? "deconstruction" : (step.kind === "required" ? "obligatoire" : "optimisation")})`;
       maxActionChars = Math.max(maxActionChars, actionText.length);
     });
 
@@ -3549,6 +5265,10 @@
               Type:
               <select class="tm-preset-select"></select>
             </label>
+            <label>
+              Compo unites:
+              <select class="tm-unit-plan-select"></select>
+            </label>
             <div class="tm-actions">
               <button type="button" class="tm-edit-btn button_new">
                 <div class="left"></div>
@@ -3589,6 +5309,9 @@
           </div>
           <div class="tm-town-name">Ville active</div>
           <div class="tm-town-preset">Type sauvegarde: -</div>
+          <div class="tm-unit-plan-summary">Compo unites: -</div>
+          <div class="tm-research-summary">Recherches recommandees: -</div>
+          <div class="tm-optimization-summary">Bonus optimisation: -</div>
           <div class="tm-town-points">Points ville: -</div>
           <div class="tm-next-action"></div>
           <div class="tm-special-building"></div>
@@ -3618,6 +5341,7 @@
 
     const worldSelect = panel.querySelector(".tm-world-select");
     const select = panel.querySelector(".tm-preset-select");
+    const unitPlanSelect = panel.querySelector(".tm-unit-plan-select");
     if (!worldSelect || !select) {
       attachPanelInteractions(panel);
       return panel;
@@ -3643,6 +5367,15 @@
       }
       safeRender(true);
     });
+    if (unitPlanSelect) {
+      unitPlanSelect.addEventListener("change", () => {
+        const town = getTown();
+        const assignedPresetKey = getAssignedPresetForTown(town);
+        const planPresetKey = resolveUnitPlanPresetKey(select.value, assignedPresetKey);
+        setSelectedUnitPlanIdForTown(planPresetKey, unitPlanSelect.value, town);
+        safeRender(true);
+      });
+    }
 
     const collapseBtn = panel.querySelector(".tm-minimize-btn");
     if (collapseBtn) {
@@ -3658,6 +5391,8 @@
     if (closeBtn) {
       closeBtn.addEventListener("click", (event) => {
         event.preventDefault();
+        clearSenateNextHighlight();
+        clearAcademyResearchHighlights();
         if (refreshTimer) {
           clearInterval(refreshTimer);
           refreshTimer = null;
@@ -3751,8 +5486,20 @@
         if (!currentTown) {
           return;
         }
-        if (!assignPresetToTown(select.value, currentTown)) {
+        const selectedPresetKey = select.value;
+        if (!assignPresetToTown(selectedPresetKey, currentTown)) {
           return;
+        }
+        const unitPlanPresetKey = resolveUnitPlanPresetKey(selectedPresetKey, selectedPresetKey);
+        const fallbackUnitPlanId = getDefaultUnitPlanIdForPreset(unitPlanPresetKey);
+        const selectedUnitPlanId = unitPlanSelect && unitPlanSelect.value
+          ? unitPlanSelect.value
+          : fallbackUnitPlanId;
+        if (selectedUnitPlanId) {
+          const assigned = setSelectedUnitPlanIdForTown(unitPlanPresetKey, selectedUnitPlanId, currentTown);
+          if (!assigned && fallbackUnitPlanId) {
+            setSelectedUnitPlanIdForTown(unitPlanPresetKey, fallbackUnitPlanId, currentTown);
+          }
         }
         safeRender(true);
       });
@@ -3805,6 +5552,7 @@
     const tableToggleBtn = panel.querySelector(".tm-table-toggle-btn");
     const assignBtn = panel.querySelector(".tm-assign-btn");
     const selectedValue = (panel.querySelector(".tm-preset-select") && panel.querySelector(".tm-preset-select").value) || presetConfig.key;
+    const unitPlanSelect = panel.querySelector(".tm-unit-plan-select");
     const currentTown = getTown();
     const assignedPreset = getAssignedPresetForTown(currentTown);
     if (queueToggleBtn) {
@@ -3815,8 +5563,12 @@
       tableToggleBtn.style.display = presetConfig.isCustom && isCustomEditMode ? "none" : "inline-block";
     }
     if (assignBtn) {
-      const isAlreadyAssigned = Boolean(currentTown && assignedPreset && assignedPreset === selectedValue);
-      setButtonLabel(assignBtn, isAlreadyAssigned ? "Type assigne" : "Assigner ville");
+      const assignedUnitPlanPresetKey = resolveUnitPlanPresetKey(selectedValue, assignedPreset);
+      const selectedUnitPlanId = (unitPlanSelect && unitPlanSelect.value) || getDefaultUnitPlanIdForPreset(assignedUnitPlanPresetKey);
+      const assignedUnitPlanId = getSelectedUnitPlanIdForTown(assignedUnitPlanPresetKey, currentTown);
+      const hasAssignedUnitPlan = Boolean(selectedUnitPlanId && assignedUnitPlanId === selectedUnitPlanId);
+      const isAlreadyAssigned = Boolean(currentTown && assignedPreset && assignedPreset === selectedValue && hasAssignedUnitPlan);
+      setButtonLabel(assignBtn, isAlreadyAssigned ? "Type+compo assignes" : "Assigner ville");
       assignBtn.disabled = !currentTown || isAlreadyAssigned;
     }
     if (!editBtn || !applyBtn || !resetBtn) {
@@ -3912,6 +5664,9 @@
       #${PANEL_ID} .tm-controls,
       #${PANEL_ID} .tm-town-name,
       #${PANEL_ID} .tm-town-preset,
+      #${PANEL_ID} .tm-unit-plan-summary,
+      #${PANEL_ID} .tm-research-summary,
+      #${PANEL_ID} .tm-optimization-summary,
       #${PANEL_ID} .tm-town-points,
       #${PANEL_ID} .tm-next-action,
       #${PANEL_ID} .tm-special-building,
@@ -4029,6 +5784,18 @@
         color: #6a4218;
         border-top: 1px solid rgba(119, 78, 34, 0.25);
         font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-unit-plan-summary {
+        color: #6a4218;
+        border-top: 1px solid rgba(119, 78, 34, 0.25);
+        font-weight: 700;
+      }
+
+      #${PANEL_ID} .tm-research-summary,
+      #${PANEL_ID} .tm-optimization-summary {
+        color: #6a4218;
+        border-top: 1px solid rgba(119, 78, 34, 0.25);
       }
 
       #${PANEL_ID} .tm-town-points {
@@ -4486,6 +6253,48 @@
         display: none;
       }
 
+      a.${SENATE_HIGHLIGHT_CLASS},
+      button.${SENATE_HIGHLIGHT_CLASS},
+      .button_new.${SENATE_HIGHLIGHT_CLASS} {
+        outline: none !important;
+        box-shadow:
+          inset 0 0 0 2px #ff2a2a,
+          inset 0 0 0 3px rgba(255, 170, 170, 0.95),
+          0 0 10px rgba(255, 42, 42, 0.9) !important;
+        border-radius: 2px !important;
+      }
+
+      .${ACADEMY_HIGHLIGHT_TODO_CLASS},
+      .${ACADEMY_HIGHLIGHT_REMOVE_CLASS},
+      .${ACADEMY_HIGHLIGHT_DONE_CLASS} {
+        outline-offset: -1px !important;
+        border-radius: 2px !important;
+      }
+
+      .${ACADEMY_HIGHLIGHT_TODO_CLASS} {
+        outline: 2px solid #39c865 !important;
+        box-shadow:
+          inset 0 0 0 2px #39c865,
+          inset 0 0 0 3px rgba(175, 255, 198, 0.95),
+          0 0 10px rgba(57, 200, 101, 0.85) !important;
+      }
+
+      .${ACADEMY_HIGHLIGHT_REMOVE_CLASS} {
+        outline: 2px solid #ff4040 !important;
+        box-shadow:
+          inset 0 0 0 2px #ff4040,
+          inset 0 0 0 3px rgba(255, 190, 190, 0.95),
+          0 0 10px rgba(255, 64, 64, 0.85) !important;
+      }
+
+      .${ACADEMY_HIGHLIGHT_DONE_CLASS} {
+        outline: 2px solid #3f7dff !important;
+        box-shadow:
+          inset 0 0 0 2px #3f7dff,
+          inset 0 0 0 3px rgba(195, 215, 255, 0.95),
+          0 0 10px rgba(63, 125, 255, 0.85) !important;
+      }
+
       @media (max-width: 700px) {
         #${PANEL_ID} {
           left: 8px;
@@ -4539,6 +6348,8 @@
       try {
         console.error("[tm-grepolis-opt] render failed", error);
       } catch (_) {}
+      clearSenateNextHighlight();
+      clearAcademyResearchHighlights();
 
       const panel = document.getElementById(PANEL_ID) || buildPanel();
       if (!panel) {
@@ -4551,6 +6362,9 @@
 
       const rowsEl = panel.querySelector(".tm-rows");
       const townPointsEl = panel.querySelector(".tm-town-points");
+      const unitPlanSummaryEl = panel.querySelector(".tm-unit-plan-summary");
+      const researchSummaryEl = panel.querySelector(".tm-research-summary");
+      const optimizationSummaryEl = panel.querySelector(".tm-optimization-summary");
       const nextActionEl = panel.querySelector(".tm-next-action");
       const specialEl = panel.querySelector(".tm-special-building");
       const planPreviewEl = panel.querySelector(".tm-plan-preview");
@@ -4563,6 +6377,15 @@
       }
       if (townPointsEl) {
         townPointsEl.textContent = "Points ville: indisponibles (fallback).";
+      }
+      if (unitPlanSummaryEl) {
+        unitPlanSummaryEl.textContent = "Compo unites: indisponible (fallback).";
+      }
+      if (researchSummaryEl) {
+        researchSummaryEl.textContent = "Recherches recommandees: indisponibles (fallback).";
+      }
+      if (optimizationSummaryEl) {
+        optimizationSummaryEl.textContent = "Bonus optimisation: indisponibles (fallback).";
       }
       if (specialEl) {
         specialEl.textContent = "Batiment special: indisponible (fallback).";
@@ -4618,6 +6441,10 @@
     const colTargetEl = panel.querySelector(".tm-col-target");
     const worldSelect = panel.querySelector(".tm-world-select");
     const select = panel.querySelector(".tm-preset-select");
+    const unitPlanSelectEl = panel.querySelector(".tm-unit-plan-select");
+    const unitPlanSummaryEl = panel.querySelector(".tm-unit-plan-summary");
+    const researchSummaryEl = panel.querySelector(".tm-research-summary");
+    const optimizationSummaryEl = panel.querySelector(".tm-optimization-summary");
 
     const currentWorldMode = getSelectedWorldMode();
     if (worldSelect && worldSelect.value !== currentWorldMode) {
@@ -4626,6 +6453,39 @@
     }
     if (select && select.value !== presetKey) {
       select.value = presetKey;
+    }
+    const unitPlanPresetKey = resolveUnitPlanPresetKey(preset.key, assignedPresetKey);
+    const unitPlans = getUnitPlansForPreset(unitPlanPresetKey);
+    const selectedUnitPlan = getSelectedUnitPlanForTown(unitPlanPresetKey, town);
+    const selectedUnitPlanId = selectedUnitPlan ? selectedUnitPlan.id : "";
+    const assignedUnitPlanPresetKey = assignedPresetKey
+      ? resolveUnitPlanPresetKey(assignedPresetKey, assignedPresetKey)
+      : "";
+    const assignedUnitPlan = assignedPresetKey
+      ? getSelectedUnitPlanForTown(assignedUnitPlanPresetKey, town)
+      : null;
+    if (unitPlanSelectEl) {
+      const listKey = `${unitPlanPresetKey}:${unitPlans.length}`;
+      if (unitPlanSelectEl.getAttribute("data-plan-list-key") !== listKey) {
+        unitPlanSelectEl.innerHTML = "";
+        unitPlans.forEach((plan) => {
+          const option = document.createElement("option");
+          option.value = plan.id;
+          option.textContent = formatUnitPlanLabel(plan) || String(plan.label || plan.id || "");
+          unitPlanSelectEl.appendChild(option);
+        });
+        unitPlanSelectEl.setAttribute("data-plan-list-key", listKey);
+      }
+      if (selectedUnitPlanId && unitPlanSelectEl.value !== selectedUnitPlanId) {
+        unitPlanSelectEl.value = selectedUnitPlanId;
+      }
+    }
+    if (unitPlanSummaryEl) {
+      if (assignedPresetKey && assignedUnitPlan) {
+        unitPlanSummaryEl.textContent = `Compo sauvegardee: ${formatUnitPlanLabel(assignedUnitPlan) || "-"}`;
+      } else {
+        unitPlanSummaryEl.textContent = formatUnitPlanSummary(selectedUnitPlan);
+      }
     }
     updateActions(panel, preset);
     applyNativePlanTableSkin(panel);
@@ -4730,13 +6590,22 @@
     }
 
     if (!preset || !rowsEl || !townNameEl || !nextActionEl || !specialEl || !planPreviewEl) {
+      clearAcademyResearchHighlights();
       return;
     }
 
     if (!levels) {
+      clearSenateNextHighlight();
+      clearAcademyResearchHighlights();
       panel.classList.remove("tm-editing-targets");
       rowsEl.innerHTML = `<tr><td colspan="4" class="tm-neutral">Impossible de lire les batiments. Ouvre une ville et attends 1-2 secondes.</td></tr>`;
       planPreviewEl.textContent = "Top 10 des prochaines constructions: en attente des donnees de ville.";
+      if (researchSummaryEl) {
+        researchSummaryEl.textContent = "Recherches recommandees: en attente des donnees.";
+      }
+      if (optimizationSummaryEl) {
+        optimizationSummaryEl.textContent = "Bonus optimisation: en attente des donnees.";
+      }
       if (townPointsEl) {
         townPointsEl.textContent = "Points ville: en attente des donnees.";
       }
@@ -4747,16 +6616,46 @@
       return;
     }
 
+    const townResearches = extractTownResearchKeys(town);
+    const researchStatus = getPresetResearchStatus(preset, townResearches, selectedUnitPlan);
+    const plan = getPriorityPlan(preset, projectedLevels, projectedEconomy, researchStatus);
+    const researchPrepSteps = plan.filter((step) => isResearchPlanStep(step));
+    const projectedResearches = new Set(researchStatus.active);
+    researchPrepSteps.forEach((step) => {
+      if (step && step.researchKey) {
+        projectedResearches.add(step.researchKey);
+      }
+    });
+    const optimizationModifiers = getOptimizationResearchModifiers(projectedResearches);
+    const hasSimulation = plan.some((item) => item && item.simulated);
+    const first = plan.length ? plan[0] : null;
+    const firstBuildingStep = plan.find((item) => item && !isResearchPlanStep(item) && !isDowngradePlanStep(item)) || null;
+    const highlightStep = firstBuildingStep || null;
+    highlightSenateNextUpgradeButton(highlightStep);
+    highlightAcademyResearches(researchStatus);
+
     const townName = getTownName(town);
     const signature = JSON.stringify({
       town: townName,
       townId: townIdentifier,
       mode: currentWorldMode,
       preset: preset.key,
+      unitPlanPreset: unitPlanPresetKey,
+      unitPlanId: selectedUnitPlanId,
       edit: isCustomEditMode,
       fullTable: isFullTableVisible,
       order: preset.priorityOrder,
       special: preset.specialBuilding,
+      researchProduction: researchStatus.productionKeys,
+      researchRecommended: researchStatus.recommendedKeys,
+      researchMissingProduction: researchStatus.missingProductionKeys,
+      researchMissing: researchStatus.missingRecommendedKeys,
+      researchPrep: researchPrepSteps.map((step) => step.researchKey),
+      serverSpeed: preset.serverTuning && Number.isFinite(preset.serverTuning.worldSpeed)
+        ? Math.round(preset.serverTuning.worldSpeed * 100) / 100
+        : null,
+      serverTier: preset.serverTuning && preset.serverTuning.speedTier ? preset.serverTuning.speedTier : "",
+      optimizationFactors: [optimizationModifiers.costFactor, optimizationModifiers.timeFactor],
       values: Object.keys(preset.targets).map((key) => getLevelForBuilding(projectedLevels, key)),
       targets: preset.targets,
       queue: buildingOrders.map((order) => [order.key, order.targetLevel, order.action || "upgrade", Math.round(order.remainingSeconds || -1)]),
@@ -4789,12 +6688,55 @@
     lastSignature = signature;
 
     townNameEl.textContent = townName;
+    const formatServerTuningText = (config) => {
+      const tuning = config && config.serverTuning;
+      if (!tuning || !Number.isFinite(tuning.worldSpeed)) {
+        return "";
+      }
+      const tierLabels = {
+        slow: "lent",
+        normal: "normal",
+        fast: "rapide",
+        very_fast: "tres rapide"
+      };
+      const tier = tierLabels[tuning.speedTier] || tuning.speedTier || "normal";
+      return ` | Serveur x${Math.round(tuning.worldSpeed * 100) / 100} (${tier})`;
+    };
     if (townPresetEl) {
       if (assignedPresetKey && assignedPresetConfig) {
-        townPresetEl.textContent = `Type sauvegarde: ${assignedPresetConfig.label}`;
+        townPresetEl.textContent = `Type sauvegarde: ${assignedPresetConfig.label}${formatServerTuningText(assignedPresetConfig)}`;
       } else {
         townPresetEl.textContent = "Type sauvegarde: aucun";
       }
+    }
+    if (researchSummaryEl) {
+      const totalResearches = researchStatus.recommendedKeys.length;
+      if (!totalResearches) {
+        researchSummaryEl.textContent = "Recherches recommandees: -";
+      } else {
+        const doneCount = totalResearches - researchStatus.missingRecommendedKeys.length;
+        const projectedDoneCount = researchStatus.recommendedKeys.filter((key) => projectedResearches.has(key)).length;
+        const missingLabels = researchStatus.missingRecommendedKeys.map((key) => getResearchLabel(key));
+        const missingText = missingLabels.length ? ` | A faire: ${missingLabels.join(", ")}` : " | Complet";
+        const missingProductionLabels = researchStatus.productionKeys
+          .filter((key) => !projectedResearches.has(key))
+          .map((key) => getResearchLabel(key));
+        const productionText = missingProductionLabels.length
+          ? ` | Priorite unites: ${missingProductionLabels.join(", ")}`
+          : "";
+        researchSummaryEl.textContent = `Recherches recommandees: ${doneCount}/${totalResearches} | Apres plan: ${projectedDoneCount}/${totalResearches}${missingText}${productionText}`;
+      }
+    }
+    if (optimizationSummaryEl) {
+      const costReduction = Math.max(0, Math.round((1 - optimizationModifiers.costFactor) * 100));
+      const timeReduction = Math.max(0, Math.round((1 - optimizationModifiers.timeFactor) * 100));
+      const pendingOptimizationLabels = researchStatus.optimizationKeys
+        .filter((key) => !projectedResearches.has(key))
+        .map((key) => getResearchLabel(key));
+      const pendingText = pendingOptimizationLabels.length
+        ? ` | Pre-requis: ${pendingOptimizationLabels.join(", ")}`
+        : "";
+      optimizationSummaryEl.textContent = `Bonus optimisation (calcul): cout batiments -${costReduction}% | temps chantier -${timeReduction}%${pendingText}`;
     }
     if (townPointsEl) {
       if (!pointsProjection) {
@@ -4811,14 +6753,16 @@
       }
     }
     rowsEl.innerHTML = "";
-
-    const plan = getPriorityPlan(preset, projectedLevels, projectedEconomy);
-    const hasSimulation = plan.some((item) => item && item.simulated);
     const priorityByKey = new Map();
-    plan.forEach((item, index) => {
+    let buildingRank = 0;
+    plan.forEach((item) => {
+      if (!item || isResearchPlanStep(item)) {
+        return;
+      }
+      buildingRank += 1;
       if (!priorityByKey.has(item.key)) {
         priorityByKey.set(item.key, {
-          rank: index + 1,
+          rank: buildingRank,
           kind: item.kind,
           targetLevel: item.targetLevel,
           finishSeconds: item.finishSeconds
@@ -4826,7 +6770,6 @@
       }
     });
 
-    const first = plan.length ? plan[0] : null;
     const previewPlan = plan.slice(0, 10);
     const displayedPlan = isFullTableVisible ? plan : plan.slice(0, COMPACT_TABLE_ROW_COUNT);
     const columnWidths = getPlanTableColumnWidths(displayedPlan);
@@ -4837,6 +6780,22 @@
     const queueContext = buildingOrders.length > 1
       ? ` File: ${buildingOrders.length} ordres (${formatDuration(queueDurationSeconds)}).`
       : "";
+    const describePlanStep = (step) => {
+      if (!step) {
+        return "template atteint";
+      }
+      if (isResearchPlanStep(step)) {
+        return `recherche ${getResearchLabel(step.researchKey || step.key)} (${getResearchStepTag(step)})`;
+      }
+      const stepName = BUILDING_LABELS[step.key] || step.key;
+      const stepTarget = step.targetLevel || (step.kind === "required" ? step.min : step.max);
+      const stepFrom = Math.max(0, toInt(step.level, 0));
+      const stepDowngrade = step.kind === "required_downgrade" || step.action === "downgrade" || stepTarget < stepFrom;
+      return stepDowngrade
+        ? `deconstruire ${stepName} ${stepFrom}->${stepTarget}`
+        : `${stepName} -> niv ${stepTarget}`;
+    };
+
     if (currentOrder) {
       const currentName = BUILDING_LABELS[currentOrder.key] || currentOrder.key;
       const currentIsDowngrade = currentOrder.action === "downgrade";
@@ -4846,35 +6805,32 @@
       const currentRemaining = Number.isFinite(currentOrder.remainingSeconds)
         ? ` (reste ${formatDuration(currentOrder.remainingSeconds)})`
         : "";
-      if (first) {
+      const nextAfterQueue = firstBuildingStep || researchPrepSteps[0] || first;
+      const currentLabel = currentIsDowngrade ? "deconstruction" : "construction";
+      nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel} (${currentLabel})${currentRemaining}.${queueContext} Apres file: ${describePlanStep(nextAfterQueue)}.`;
+    } else if (first) {
+      if (isResearchPlanStep(first)) {
+        const researchName = getResearchLabel(first.researchKey || first.key);
+        const researchTag = getResearchStepTag(first);
+        const waitText = first.waitSeconds > 0 ? ` (attente ressources ${formatDuration(first.waitSeconds)})` : "";
+        const thenText = firstBuildingStep ? ` Puis ${describePlanStep(firstBuildingStep)}.` : "";
+        nextActionEl.textContent = `A lancer maintenant: recherche ${researchName} (${researchTag})${waitText}.${thenText}`;
+      } else {
         const firstName = BUILDING_LABELS[first.key] || first.key;
         const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
         const firstFrom = Math.max(0, toInt(first.level, 0));
         const firstIsDowngrade = first.kind === "required_downgrade" || first.action === "downgrade" || firstTarget < firstFrom;
-        const firstActionText = firstIsDowngrade
-          ? `${firstName} ${firstFrom}->${firstTarget} (deconstruction)`
-          : `${firstName} -> niv ${firstTarget}`;
-        const currentLabel = currentIsDowngrade ? "deconstruction" : "construction";
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel} (${currentLabel})${currentRemaining}.${queueContext} Apres file: ${firstActionText}.`;
-      } else {
-        const currentLabel = currentIsDowngrade ? "deconstruction" : "construction";
-        nextActionEl.textContent = `En cours: ${currentName} ${currentFrom}->${currentOrder.targetLevel} (${currentLabel})${currentRemaining}.${queueContext} Ensuite: template atteint.`;
-      }
-    } else if (first) {
-      const firstName = BUILDING_LABELS[first.key] || first.key;
-      const firstTarget = first.targetLevel || (first.kind === "required" ? first.min : first.max);
-      const firstFrom = Math.max(0, toInt(first.level, 0));
-      const firstIsDowngrade = first.kind === "required_downgrade" || first.action === "downgrade" || firstTarget < firstFrom;
-      if (firstIsDowngrade) {
-        nextActionEl.textContent = `A lancer maintenant: deconstruire ${firstName} ${firstFrom}->${firstTarget} (obligatoire).`;
-      } else {
-        const firstTag = first.kind === "required" ? "obligatoire" : "optimisation";
-        if (hasSimulation) {
-          const waitText = first.waitSeconds > 0 ? `attente ${formatDuration(first.waitSeconds)}` : "demarrage immediat";
-          const buildText = first.buildSeconds > 0 ? `chantier ${formatDuration(first.buildSeconds)}` : "chantier court";
-          nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | ${waitText}, ${buildText}`;
+        if (firstIsDowngrade) {
+          nextActionEl.textContent = `A lancer maintenant: deconstruire ${firstName} ${firstFrom}->${firstTarget} (obligatoire).`;
         } else {
-          nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | mode simplifie`;
+          const firstTag = first.kind === "required" ? "obligatoire" : "optimisation";
+          if (hasSimulation) {
+            const waitText = first.waitSeconds > 0 ? `attente ${formatDuration(first.waitSeconds)}` : "demarrage immediat";
+            const buildText = first.buildSeconds > 0 ? `chantier ${formatDuration(first.buildSeconds)}` : "chantier court";
+            nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | ${waitText}, ${buildText}`;
+          } else {
+            nextActionEl.textContent = `A lancer maintenant: ${firstName} -> niv ${firstTarget} (${firstTag}) | mode simplifie`;
+          }
         }
       }
     } else {
@@ -4884,8 +6840,11 @@
     const displayHint = plan.length > COMPACT_TABLE_ROW_COUNT
       ? ` Affichage ${displayedPlan.length}/${plan.length}.`
       : "";
+    const researchHint = researchPrepSteps.length
+      ? ` Recherches planifiees: ${researchPrepSteps.length}.`
+      : "";
     planPreviewEl.textContent = previewPlan.length
-      ? `Top ${previewPlan.length} prochaines actions optimisees${queueDurationSeconds > 0 ? ` (file: ${formatDuration(queueDurationSeconds)})` : ""}.${displayHint}`
+      ? `Top ${previewPlan.length} prochaines actions optimisees${queueDurationSeconds > 0 ? ` (file: ${formatDuration(queueDurationSeconds)})` : ""}.${researchHint}${displayHint}`
       : "Aucune action restante pour ce preset.";
 
     const special = preset.specialBuilding || inferSpecialBuilding(preset.targets);
@@ -4893,13 +6852,14 @@
       const specialRange = normalizeRange(special.target) || normalizeRange(preset.targets[special.key]) || [1, 1];
       const specialLevel = getLevelForBuilding(projectedLevels, special.key);
       const specialName = BUILDING_LABELS[special.key] || special.key;
+      const remainingBuildingSteps = plan.filter((step) => !isResearchPlanStep(step)).length;
       const specialStatus = specialLevel < specialRange[0]
         ? "a construire maintenant"
         : specialLevel < specialRange[1]
           ? "a poursuivre"
           : "ok";
-      const remainingText = hasSimulation && plan.length
-        ? ` | ${plan.length} niveau(x) restant(s)`
+      const remainingText = hasSimulation && remainingBuildingSteps
+        ? ` | ${remainingBuildingSteps} niveau(x) restant(s)`
         : "";
       specialEl.textContent = `Batiment special: ${specialName} (${specialLevel}/${formatTarget(specialRange)}) - ${specialStatus}${remainingText}`;
     } else {
@@ -4946,25 +6906,32 @@
 
       displayedPlan.forEach((step, index) => {
         const row = document.createElement("tr");
-        const buildingName = BUILDING_LABELS[step.key] || step.key;
-        const iconUrl = getIconUrl(step.key);
+        const isResearchStep = isResearchPlanStep(step);
+        const researchLabel = isResearchStep ? getResearchLabel(step.researchKey || step.key) : "";
+        const buildingName = isResearchStep
+          ? `Academie (${researchLabel})`
+          : (BUILDING_LABELS[step.key] || step.key);
+        const iconUrl = isResearchStep ? getIconUrl("academy") : getIconUrl(step.key);
         const fromLevel = toInt(step.level, 0);
         const toLevel = toInt(step.targetLevel, fromLevel + 1);
-        const isDowngradeStep = step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel;
-        const tag = isDowngradeStep
-          ? "deconstruction"
-          : (step.kind === "required" ? "obligatoire" : "optimisation");
-        const stateClass = isDowngradeStep
-          ? "tm-high"
-          : (step.kind === "required" ? "tm-low" : "tm-mid");
+        const isDowngradeStep = !isResearchStep && (step.kind === "required_downgrade" || step.action === "downgrade" || toLevel < fromLevel);
+        const researchTag = isResearchStep ? getResearchStepTag(step) : "";
+        const tag = isResearchStep
+          ? researchTag
+          : (isDowngradeStep ? "deconstruction" : (step.kind === "required" ? "obligatoire" : "optimisation"));
+        const stateClass = isResearchStep
+          ? getResearchStepStateClass(step)
+          : (isDowngradeStep ? "tm-high" : (step.kind === "required" ? "tm-low" : "tm-mid"));
         const waitSeconds = Math.max(0, Number(step.waitSeconds) || 0);
         const buildSeconds = Math.max(0, Number(step.buildSeconds) || 0);
         const finishSeconds = Math.max(0, Number(step.finishSeconds) || waitSeconds + buildSeconds);
         const finishFromNowSeconds = finishSeconds + queueDurationSeconds;
         const launchFromNowSeconds = Math.max(0, finishFromNowSeconds - buildSeconds);
-        const timing = isDowngradeStep
-          ? `Deconstruction immediate | Attente ${formatDuration(launchFromNowSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`
-          : `Attente ${formatDuration(launchFromNowSeconds)} | Construction ${formatDuration(buildSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`;
+        const timing = isResearchStep
+          ? `Attente ${formatDuration(launchFromNowSeconds)} | Recherche academie | Fin estimee ${formatDuration(finishFromNowSeconds)}`
+          : (isDowngradeStep
+              ? `Deconstruction immediate | Attente ${formatDuration(launchFromNowSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`
+              : `Attente ${formatDuration(launchFromNowSeconds)} | Construction ${formatDuration(buildSeconds)} | Fin estimee ${formatDuration(finishFromNowSeconds)}`);
 
         const prioCell = document.createElement("td");
         prioCell.className = "tm-prio-cell";
@@ -4992,7 +6959,9 @@
 
         const actionCell = document.createElement("td");
         actionCell.className = stateClass;
-        actionCell.textContent = `Niv ${fromLevel} -> ${toLevel} (${tag})`;
+        actionCell.textContent = isResearchStep
+          ? `Recherche ${researchLabel}${researchTag ? ` (${researchTag})` : ""}`
+          : `Niv ${fromLevel} -> ${toLevel} (${tag})`;
 
         const timingCell = document.createElement("td");
         timingCell.textContent = timing;
