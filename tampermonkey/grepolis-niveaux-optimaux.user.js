@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grepolis - Niveaux optimaux de batiments
 // @namespace    https://github.com/GoldenEagleFr/Wiki_Grepolis
-// @version      1.5.11
+// @version      1.5.12
 // @description  Niveaux optimaux avec simulation cout/temps, mode monde (Revolte/Conquete), fenetre deplacable et redimensionnable.
 // @author       GoldenEagleFr
 // @match        https://*.grepolis.com/game/*
@@ -21,7 +21,9 @@
   const CUSTOM_TARGETS_KEY_PREFIX = "tm_grepolis_custom_targets_v2";
   const LEGACY_CUSTOM_TARGETS_KEY = "tm_grepolis_custom_targets_v1";
   const PANEL_LAYOUT_KEY = "tm_grepolis_panel_layout_v1";
+  const PANEL_DETAILS_KEY = "tm_grepolis_panel_details_v1";
   const PANEL_ID = "tm-grepolis-opt-panel";
+  const MINI_DOCK_ID = "tm-grepolis-opt-dock";
   const CUSTOM_PRESET_ID = "custom";
   const GENERIC_UNIT_PLAN_KEY = "generic";
   const DIO_TOWN_ICON_CODE_BY_PRESET = Object.freeze({
@@ -491,6 +493,7 @@
   let isCustomEditMode = false;
   let isQueueDetailsVisible = false;
   let isFullTableVisible = false;
+  let isInfoDetailsVisible = false;
   let refreshTimer = null;
   let lastPresetSyncScope = "";
   const levelCacheByTown = new Map();
@@ -530,6 +533,75 @@
       }
     });
     return out;
+  }
+
+  function getInfoDetailsVisible() {
+    try {
+      return localStorage.getItem(PANEL_DETAILS_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setInfoDetailsVisible(value) {
+    isInfoDetailsVisible = Boolean(value);
+    try {
+      localStorage.setItem(PANEL_DETAILS_KEY, isInfoDetailsVisible ? "1" : "0");
+    } catch (_) {}
+  }
+
+  function buildMiniDock() {
+    const existing = document.getElementById(MINI_DOCK_ID);
+    if (existing) {
+      return existing;
+    }
+    const dock = document.createElement("aside");
+    dock.id = MINI_DOCK_ID;
+    dock.innerHTML = `
+      <div class="tm-dock-head">Assistant ville</div>
+      <div class="tm-dock-row tm-dock-town">Ville: -</div>
+      <div class="tm-dock-row tm-dock-type">Type: -</div>
+      <div class="tm-dock-row tm-dock-compo">Unites: -</div>
+      <div class="tm-dock-row tm-dock-queue">File: -</div>
+      <div class="tm-dock-row tm-dock-next">Action: -</div>
+    `;
+    document.body.appendChild(dock);
+    return dock;
+  }
+
+  function updateMiniDock(data) {
+    const dock = buildMiniDock();
+    if (!dock) {
+      return;
+    }
+    const townEl = dock.querySelector(".tm-dock-town");
+    const typeEl = dock.querySelector(".tm-dock-type");
+    const compoEl = dock.querySelector(".tm-dock-compo");
+    const queueEl = dock.querySelector(".tm-dock-queue");
+    const nextEl = dock.querySelector(".tm-dock-next");
+    if (townEl) {
+      townEl.textContent = `Ville: ${data && data.town ? data.town : "-"}`;
+    }
+    if (typeEl) {
+      typeEl.textContent = `Type: ${data && data.type ? data.type : "-"}`;
+    }
+    if (compoEl) {
+      compoEl.textContent = `Unites: ${data && data.compo ? data.compo : "-"}`;
+    }
+    if (queueEl) {
+      queueEl.textContent = `File: ${data && data.queue ? data.queue : "-"}`;
+    }
+    if (nextEl) {
+      nextEl.textContent = `Action: ${data && data.next ? data.next : "-"}`;
+      nextEl.title = nextEl.textContent;
+    }
+  }
+
+  function removeMiniDock() {
+    const dock = document.getElementById(MINI_DOCK_ID);
+    if (dock) {
+      dock.remove();
+    }
   }
 
   function getSelectedWorldMode() {
@@ -5834,6 +5906,11 @@
                 <div class="right"></div>
                 <div class="caption js-caption"><span class="tm-btn-label">Afficher tout</span><div class="effect js-effect"></div></div>
               </button>
+              <button type="button" class="tm-details-toggle-btn button_new">
+                <div class="left"></div>
+                <div class="right"></div>
+                <div class="caption js-caption"><span class="tm-btn-label">Afficher details</span><div class="effect js-effect"></div></div>
+              </button>
               <button type="button" class="tm-assign-btn button_new">
                 <div class="left"></div>
                 <div class="right"></div>
@@ -5872,6 +5949,7 @@
     `;
 
     document.body.appendChild(panel);
+    panel.classList.toggle("tm-details-open", isInfoDetailsVisible);
 
     const worldSelect = panel.querySelector(".tm-world-select");
     const select = panel.querySelector(".tm-preset-select");
@@ -5931,6 +6009,7 @@
           clearInterval(refreshTimer);
           refreshTimer = null;
         }
+        removeMiniDock();
         panel.remove();
       });
     }
@@ -6060,6 +6139,14 @@
         safeRender(true);
       });
     }
+    const detailsToggleBtn = panel.querySelector(".tm-details-toggle-btn");
+    if (detailsToggleBtn) {
+      detailsToggleBtn.addEventListener("click", () => {
+        setInfoDetailsVisible(!isInfoDetailsVisible);
+        panel.classList.toggle("tm-details-open", isInfoDetailsVisible);
+        safeRender(true);
+      });
+    }
 
     attachPanelInteractions(panel);
 
@@ -6084,6 +6171,7 @@
     const resetBtn = panel.querySelector(".tm-reset-btn");
     const queueToggleBtn = panel.querySelector(".tm-queue-toggle-btn");
     const tableToggleBtn = panel.querySelector(".tm-table-toggle-btn");
+    const detailsToggleBtn = panel.querySelector(".tm-details-toggle-btn");
     const assignBtn = panel.querySelector(".tm-assign-btn");
     const selectedValue = (panel.querySelector(".tm-preset-select") && panel.querySelector(".tm-preset-select").value) || presetConfig.key;
     const unitPlanSelect = panel.querySelector(".tm-unit-plan-select");
@@ -6095,6 +6183,9 @@
     if (tableToggleBtn) {
       setButtonLabel(tableToggleBtn, isFullTableVisible ? "Afficher 4 lignes" : "Afficher tout");
       tableToggleBtn.style.display = presetConfig.isCustom && isCustomEditMode ? "none" : "inline-block";
+    }
+    if (detailsToggleBtn) {
+      setButtonLabel(detailsToggleBtn, isInfoDetailsVisible ? "Masquer details" : "Afficher details");
     }
     if (assignBtn) {
       const assignedUnitPlanPresetKey = resolveUnitPlanPresetKey(selectedValue, assignedPreset);
@@ -6289,6 +6380,7 @@
       #${PANEL_ID} .tm-actions .tm-layout-reset-btn,
       #${PANEL_ID} .tm-actions .tm-queue-toggle-btn,
       #${PANEL_ID} .tm-actions .tm-table-toggle-btn,
+      #${PANEL_ID} .tm-actions .tm-details-toggle-btn,
       #${PANEL_ID} .tm-actions .tm-assign-btn {
         width: 168px;
         min-width: 168px;
@@ -6346,6 +6438,53 @@
 
       #${PANEL_ID} .tm-plan-preview {
         border-bottom: 1px solid rgba(119, 78, 34, 0.25);
+      }
+
+      #${PANEL_ID}:not(.tm-details-open) .tm-town-preset,
+      #${PANEL_ID}:not(.tm-details-open) .tm-research-summary,
+      #${PANEL_ID}:not(.tm-details-open) .tm-optimization-summary,
+      #${PANEL_ID}:not(.tm-details-open) .tm-town-points,
+      #${PANEL_ID}:not(.tm-details-open) .tm-special-building,
+      #${PANEL_ID}:not(.tm-details-open) .tm-plan-preview {
+        display: none;
+      }
+
+      #${PANEL_ID}:not(.tm-details-open) .tm-next-action {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #${MINI_DOCK_ID} {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        width: min(360px, calc(100vw - 24px));
+        z-index: 11990;
+        border: 1px solid #7d5a2b;
+        background:
+          linear-gradient(180deg, rgba(250, 239, 212, 0.97) 0%, rgba(224, 198, 154, 0.97) 100%),
+          url("${ASSETS.ui.panelOverlay}");
+        color: #2f210d;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 245, 220, 0.75),
+          0 4px 12px rgba(0, 0, 0, 0.28);
+        font-size: 11px;
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-head {
+        padding: 6px 8px;
+        font-weight: 700;
+        border-bottom: 1px solid rgba(119, 78, 34, 0.35);
+        background: rgba(124, 90, 42, 0.12);
+      }
+
+      #${MINI_DOCK_ID} .tm-dock-row {
+        padding: 5px 8px;
+        border-top: 1px solid rgba(119, 78, 34, 0.2);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       #${PANEL_ID} .tm-queue-list {
@@ -6915,6 +7054,13 @@
         #${PANEL_ID} .tm-actions {
           grid-template-columns: 1fr;
         }
+
+        #${MINI_DOCK_ID} {
+          left: 8px;
+          right: 8px;
+          bottom: 8px;
+          width: auto;
+        }
       }
     `;
     document.head.appendChild(style);
@@ -6975,6 +7121,13 @@
       if (planPreviewEl) {
         planPreviewEl.textContent = "Fallback actif.";
       }
+      updateMiniDock({
+        town: getTownName(getTown()),
+        type: "indisponible",
+        compo: "-",
+        queue: "indisponible",
+        next: "Rendu en fallback"
+      });
     }
   }
 
@@ -6983,6 +7136,7 @@
     if (!panel) {
       return;
     }
+    panel.classList.toggle("tm-details-open", isInfoDetailsVisible);
 
     const town = getTown();
     const townIdentifier = getTownIdentifier(town);
@@ -7194,6 +7348,13 @@
       if (townPointsEl) {
         townPointsEl.textContent = "Points ville: en attente des donnees.";
       }
+      updateMiniDock({
+        town: getTownName(town),
+        type: (assignedPresetConfig && assignedPresetConfig.label) || preset.label || "-",
+        compo: "en attente",
+        queue: buildingOrders.length ? `${buildingOrders.length} ordres` : "vide",
+        next: "En attente des donnees de ville"
+      });
       return;
     }
 
@@ -7229,6 +7390,7 @@
       unitPlanId: selectedUnitPlanId,
       edit: isCustomEditMode,
       fullTable: isFullTableVisible,
+      details: isInfoDetailsVisible,
       order: preset.priorityOrder,
       special: preset.specialBuilding,
       researchProduction: researchStatus.productionKeys,
@@ -7451,6 +7613,19 @@
       specialEl.textContent = "Batiment special: non defini pour ce preset.";
     }
 
+    const dockTypeLabel = assignedPresetConfig ? assignedPresetConfig.label : (preset.label || "-");
+    const dockQueueLabel = buildingOrders.length
+      ? `${buildingOrders.length} ordres (${formatDuration(queueDurationSeconds)})`
+      : "vide";
+    const dockCompoLabel = unitPlanProgressText.replace(/^Unites formees:\s*/i, "");
+    updateMiniDock({
+      town: townName,
+      type: dockTypeLabel,
+      compo: dockCompoLabel,
+      queue: dockQueueLabel,
+      next: (nextActionEl && nextActionEl.textContent) || "-"
+    });
+
     const orderIndex = new Map((preset.priorityOrder || []).map((key, index) => [key, index]));
     const targetEntries = Object.entries(preset.targets).sort((a, b) => {
       const aPrio = priorityByKey.get(a[0]);
@@ -7645,6 +7820,7 @@
     if (!/\/game\//.test(window.location.pathname)) {
       return;
     }
+    isInfoDetailsVisible = getInfoDetailsVisible();
     injectStyles();
     buildPanel();
     safeRender(true);
